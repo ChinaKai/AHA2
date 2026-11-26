@@ -56,6 +56,25 @@ test("Ctrl+K and Cmd+K open the palette while plain K does not", () => {
   assert.equal(palette.isPaletteShortcut({key: "k", metaKey: true, altKey: true}), false);
 });
 
+test("Alt+P opens the pet workbench by physical key and stays out of IME and other modifiers", () => {
+  const shortcut = palette.isPetWorkbenchShortcut;
+  assert.deepEqual(palette.PET_WORKBENCH_SHORTCUT, {code: "KeyP", label: "Alt+P", macLabel: "⌥P"});
+  assert.equal(shortcut({key: "p", code: "KeyP", altKey: true}), true);
+  // macOS Option+P types "π": the physical key still matches.
+  assert.equal(shortcut({key: "π", code: "KeyP", altKey: true}), true);
+  // A different layout puts another letter on the physical P key; the
+  // shortcut follows the key, like Ctrl+K follows "k".
+  assert.equal(shortcut({key: "p", code: "KeyP"}), false, "no modifier");
+  assert.equal(shortcut({key: "p", code: "KeyP", altKey: true, shiftKey: true}), false);
+  assert.equal(shortcut({key: "p", code: "KeyP", altKey: true, ctrlKey: true}), false, "AltGr reports Ctrl+Alt on Windows");
+  assert.equal(shortcut({key: "p", code: "KeyP", altKey: true, metaKey: true}), false);
+  assert.equal(shortcut({key: "o", code: "KeyO", altKey: true}), false);
+  assert.equal(shortcut({key: "p", code: "KeyP", altKey: true, isComposing: true}), false, "IME composing");
+  assert.equal(shortcut({key: "Process", code: "KeyP", altKey: true, keyCode: 229}), false, "IME keyCode 229");
+  assert.equal(palette.petWorkbenchShortcutLabel("Win32"), "Alt+P");
+  assert.equal(palette.petWorkbenchShortcutLabel("MacIntel"), "⌥P");
+});
+
 test("IME composition swallows Enter and arrows until the composition is committed", () => {
   const context = {count: 3, activeIndex: 1};
   assert.deepEqual(
@@ -260,7 +279,12 @@ test("main.ts wires the shortcut, dialog semantics, IME guard and routing", asyn
   assert.match(main, /state\.selectedProject = project;/);
   assert.match(main, /switchView\(view\)/);
   assert.match(main, /await openTaskCreateDialogFromPalette\(\)/);
-  assert.match(main, /petWorkbenchTab = "approvals";/);
+  // The approvals tab is gone (task-813): "Open approvals" and the workbench
+  // page entry mean handle what is pending (the overview's "for you"); the
+  // approval history entry opens the records tab on that group.
+  assert.match(main, /openPetWorkbenchFor\("handle-pending"\)/);
+  assert.match(main, /openPetWorkbenchFor\("approval-history"\)/);
+  assert.doesNotMatch(main, /petWorkbenchTab = "approvals";/);
 
   // Focus returns to the trigger after closing and after a route change...
   assert.match(main, /function closeCommandPalette\(restoreFocus = true\): void \{[\s\S]{0,600}?if \(!restoreFocus\) return;[\s\S]{0,240}?previous\?\.isConnected\) previous\.focus\(\)/);

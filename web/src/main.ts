@@ -1,18 +1,18 @@
 import {api, setAPIRequestObserver, workspaceViewerEndpoints} from "./api.js";
 import type {APIRequestSample} from "./api.js";
-import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
+import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, isPetWorkbenchShortcut, paletteKeyAction, petWorkbenchShortcutLabel, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
 import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
 import type {OnboardingChecklist} from "./onboarding.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
-import {createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, PET_WORKBENCH_TIMEOUT_MS, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
-import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
+import {createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, petWorkbenchIntentTab, petWorkbenchTabAnchor, PET_APPROVAL_MAX_LIMIT, PET_WORKBENCH_TIMEOUT_MS, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
+import type {PetWorkbenchIntent, PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {conversationItemKeys, conversationRenderableItems, conversationWindow, renderConversationList} from "./conversation_ui.js";
 import type {ConversationWindow, ConversationWindowOptions} from "./conversation_ui.js";
 import {chunkErrorHTML, chunkLoadingHTML, createLazyPage, retryLazyPage} from "./lazy_page.js";
 import type {LazyPage} from "./lazy_page.js";
 import {icon} from "./icons.js";
-import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalDetail, renderPetApprovalFilters, renderPetApprovalList, selectedPetApprovalOption} from "./pet_approvals.js";
+import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalDetail, renderPetApprovalFilters, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import type {ResourcesTab} from "./resources.js";
@@ -856,6 +856,15 @@ const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApproval
 let seenPendingApprovals: number | null = null;
 let petPendingApprovalTimer = 0;
 let petWorkbenchTab = "overview";
+// Set by an entry that means "handle pending approvals": the next overview
+// paint moves focus to the "for you" list (and brings it into view).
+let petWorkbenchFocusNeeds = false;
+// The live workbench page's overview refresher (at most one is mounted).
+type PetDeskRefresher = ReturnType<PetDeskModule["createPetDeskRefresher"]>;
+const petDeskRefreshers = new Set<PetDeskRefresher>();
+function notifyPetDesk(kind: "event" | "wake"): void {
+  petDeskRefreshers.forEach(refresher => kind === "event" ? refresher.notify() : refresher.wake());
+}
 // Records table of contents: wide screens start open, phones start folded. The
 // choice lives here, not in the rendered node, so switching tabs (which
 // replaces the body) keeps it for the rest of the session.
@@ -865,7 +874,9 @@ let petRecordsTocOpen: boolean | null = null;
 // render cannot abort and restart its request; leaving the view releases it.
 const petWorkbenchPageKeeper = createPetWorkbenchPageKeeper();
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
-let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "pending";
+// The approval history (records tab) shows every status by default: the
+// pending queue is the overview's "for you" list now.
+let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "all";
 // Mobile folds the approval detail and filters into full-screen dialogs. They
 // live outside #app so a background refresh cannot detach them mid-decision.
 let petWorkbenchDialog: HTMLDialogElement | null = null;
@@ -2190,6 +2201,7 @@ function commandPalettePages(): CommandItem[] {
   return [
     {id: "page:models", kind: "page", label: t("nav.models"), detail: t("palette.page.modelsDetail"), keywords: ["model", "models", "模型"], target: "models"},
     {id: "page:pet-workbench", kind: "page", label: t("palette.petApprovalsPage"), detail: t("palette.page.approvalsDetail"), keywords: ["approval", "approvals", "审批", "pet", "宠物"], target: "pet-workbench"},
+    {id: "page:pet-approval-history", kind: "page", label: t("palette.petApprovalHistory"), detail: t("palette.page.approvalHistoryDetail"), keywords: ["approval", "approvals", "history", "审批", "记录", "历史"], target: "pet-approval-history"},
     {id: "page:knowledge", kind: "page", label: t("nav.knowledge"), detail: t("palette.page.knowledgeDetail"), keywords: ["knowledge", "doc", "知识", "文档"], target: "knowledge"},
     {id: "page:channels", kind: "page", label: t("nav.channels"), detail: t("palette.page.channelsDetail"), keywords: ["channel", "channels", "bot", "渠道"], target: "channels"},
     {id: "page:mcp", kind: "page", label: "MCP", detail: t("palette.page.mcpDetail"), keywords: ["mcp", "tool", "工具"], target: "mcp"},
@@ -2203,8 +2215,8 @@ function commandPaletteActions(): CommandItem[] {
     {id: "action:new-task", kind: "action", label: t("palette.newTask"), detail: t("palette.newTaskDetail"), keywords: ["new", "create", "task", "新建", "任务"], target: "new-task"},
     {id: "action:open-models", kind: "action", label: t("palette.openModels"), detail: t("nav.models"), keywords: ["model", "models", "模型"], target: "models"},
     {id: "action:open-onboarding", kind: "action", label: t("onboarding.open"), detail: t("onboarding.openDetail"), keywords: ["onboarding", "setup", "guide", "getting started", "首装", "引导"], target: "onboarding"},
-    {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("petWorkbench.approvals"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
-    {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: t("petWorkbench.title"), keywords: ["pet", "workbench", "宠物", "工作台"], target: "pet-workbench"},
+    {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("palette.page.approvalsDetail"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
+    {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: `${t("petWorkbench.title")} · ${petWorkbenchShortcutText()}`, keywords: ["pet", "workbench", "宠物", "工作台", "alt+p"], target: "pet-workbench"},
   ];
 }
 
@@ -2474,6 +2486,33 @@ async function openTaskCreateDialogFromPalette(): Promise<void> {
   showTaskCreateDialog();
 }
 
+// petWorkbenchFocusTarget is the element an entry asked focus to land on:
+// the overview's "for you" list or the records tab's approval history
+// heading. The workbench sets it while painting; the palette (which restores
+// focus after navigating) and the shortcut call focusPetWorkbenchTarget last.
+let petWorkbenchFocusTarget: HTMLElement | null = null;
+
+function focusPetWorkbenchTarget(): boolean {
+  const target = petWorkbenchFocusTarget;
+  petWorkbenchFocusTarget = null;
+  if (!target?.isConnected) return false;
+  target.focus({preventScroll: true});
+  return true;
+}
+
+// openPetWorkbenchFor routes every pet workbench entry by intent:
+// "handle-pending" opens the overview and moves focus to its "for you" list;
+// "approval-history" opens the records tab on the approval history group.
+function openPetWorkbenchFor(intent: PetWorkbenchIntent | "overview"): void {
+  petWorkbenchTab = intent === "overview" ? "overview" : petWorkbenchIntentTab(intent);
+  if (intent === "handle-pending") petWorkbenchFocusNeeds = true;
+  if (state.view === "pet-workbench" && petWorkbenchPageKeeper.binding?.show) {
+    petWorkbenchPageKeeper.binding.show(petWorkbenchTab);
+    return;
+  }
+  switchView("pet-workbench");
+}
+
 async function runCommandPaletteAction(action: string): Promise<void> {
   if (action === "new-task") {
     await openTaskCreateDialogFromPalette();
@@ -2482,11 +2521,10 @@ async function runCommandPaletteAction(action: string): Promise<void> {
   } else if (action === "onboarding") {
     await openOnboardingChecklist();
   } else if (action === "approvals") {
-    petWorkbenchTab = "approvals";
-    switchView("pet-workbench");
+    // "Open approvals" means handle what is pending: the overview's "for you".
+    openPetWorkbenchFor("handle-pending");
   } else if (action === "pet-workbench") {
-    petWorkbenchTab = "overview";
-    switchView("pet-workbench");
+    openPetWorkbenchFor("overview");
   }
 }
 
@@ -2497,9 +2535,18 @@ async function navigateCommandPaletteItem(item: CommandItem): Promise<void> {
   } else if (item.kind === "project" || item.kind === "workspace") {
     openCommandPaletteProject(item.target);
   } else if (item.kind === "page") {
+    if (item.target === "pet-approval-history") {
+      openPetWorkbenchFor("approval-history");
+      return;
+    }
     const view = viewFromName(item.target);
     if (!view) return;
-    if (view === "pet-workbench") petWorkbenchTab = "approvals";
+    // The workbench page entry is "Approvals (Pet workbench)": pending
+    // approvals are on the overview.
+    if (view === "pet-workbench") {
+      openPetWorkbenchFor("handle-pending");
+      return;
+    }
     switchView(view);
   } else {
     await runCommandPaletteAction(item.target);
@@ -2523,7 +2570,7 @@ async function executeCommandPaletteItem(item: CommandItem): Promise<void> {
     // The navigation replaced the shell, so the element that opened the
     // palette may be detached; put focus on the freshly rendered trigger.
     if (item.target === "onboarding") onboarding?.focus();
-    else focusCommandPaletteTrigger();
+    else if (!focusPetWorkbenchTarget()) focusCommandPaletteTrigger();
   }
 }
 
@@ -2540,6 +2587,16 @@ document.addEventListener("keydown", event => {
   event.preventDefault();
   if (commandPaletteRoot?.open) closeCommandPalette();
   else openCommandPalette();
+});
+
+// Alt+P opens the pet workbench's overview from anywhere, including a text
+// field (like Ctrl+K). It waits while a dialog or the command palette is
+// open and while an IME is composing.
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || !isPetWorkbenchShortcut(event)) return;
+  if (!state.auth?.authenticated || document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  openPetWorkbenchFor("overview");
 });
 
 // Escape dismisses the Task detail like its back control. A dialog, the command
@@ -4309,6 +4366,16 @@ function petPendingApprovalLabel(): string {
   return `${t("petWorkbench.title")} · ${t("petWorkbench.pendingCount", {count: petApprovalCounter.pending})}`;
 }
 
+function petWorkbenchShortcutText(): string {
+  return petWorkbenchShortcutLabel(navigator.platform || "");
+}
+
+// The pet nav button's name carries the shortcut so it can be discovered
+// from the tooltip and read out by a screen reader.
+function petNavLabel(pending: number): string {
+  return `${pending > 0 ? petPendingApprovalLabel() : t("nav.pet")} (${petWorkbenchShortcutText()})`;
+}
+
 function updatePetPendingApprovalIndicators(): void {
   const pending = petApprovalCounter.pending;
   const added = seenPendingApprovals === null ? 0 : pending - seenPendingApprovals;
@@ -4316,14 +4383,12 @@ function updatePetPendingApprovalIndicators(): void {
   if (added > 0) announceStatus(t("a11y.newApprovals", {count: added}));
   document.querySelectorAll<HTMLElement>('[data-view="pet-workbench"]').forEach(button => {
     button.classList.toggle("has-pending", pending > 0);
-    const label = pending > 0 ? petPendingApprovalLabel() : t("nav.pet");
+    const label = petNavLabel(pending);
     button.title = label;
     button.setAttribute("aria-label", label);
     button.querySelector(".task-tool-badge")?.remove();
     button.insertAdjacentHTML("beforeend", petPendingApprovalBadge(pending));
   });
-  const count = document.querySelector<HTMLElement>("#pet-approval-count");
-  if (count) count.textContent = pending > 0 ? String(pending) : "";
 }
 
 async function refreshPetPendingApprovalCount(afterMutation = false): Promise<void> {
@@ -4341,11 +4406,12 @@ function refreshPetApprovalState(): void {
 
 function navButton(view: View, glyph: string, label: Parameters<typeof t>[0]): string {
   const pending = view === "pet-workbench" ? petApprovalCounter.pending : 0;
-  const description = pending > 0 ? petPendingApprovalLabel() : t(label);
-  return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}">${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
+  const description = view === "pet-workbench" ? petNavLabel(pending) : t(label);
+  const shortcut = view === "pet-workbench" ? ` aria-keyshortcuts="Alt+P"` : "";
+  return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}"${shortcut}>${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
 }
 
-function shell(content: string, options: {taskShell?: boolean; taskBand?: string} = {}): string {
+function shell(content: string, options: {taskShell?: boolean; taskBand?: string; railShell?: boolean} = {}): string {
   const nav = [
     ["projects", "projects", "nav.projects"],
     ["tasks", "tasks", "nav.tasks"],
@@ -4359,10 +4425,14 @@ function shell(content: string, options: {taskShell?: boolean; taskBand?: string
   // The Task detail shell fixes the sidebar to its icon rail and inserts the
   // task band between nav and workspace. Every other page keeps the existing
   // resizable sidebar.
+  // The pet workbench folds the sidebar to the same icon rail without the
+  // band, so its board gets the width. The saved sidebar width and the notes'
+  // state are left untouched and come back on every other page.
   const taskShell = options.taskShell === true;
+  const railShell = !taskShell && options.railShell === true;
   const bandExpanded = taskShell && taskBandExpanded();
   const bandOverlay = taskShell && taskBandNarrow() && state.taskBandNarrowOpen;
-  const shellClass = `app-shell${taskShell ? " task-shell" : ""}${taskShell && !bandExpanded ? " task-band-collapsed" : ""}${bandOverlay ? " task-band-overlay" : ""}`;
+  const shellClass = `app-shell${taskShell ? " task-shell" : ""}${railShell ? " rail-shell" : ""}${taskShell && !bandExpanded ? " task-band-collapsed" : ""}${bandOverlay ? " task-band-overlay" : ""}`;
   return `<div class="${shellClass}">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
@@ -4376,7 +4446,7 @@ function shell(content: string, options: {taskShell?: boolean; taskBand?: string
       <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.web_version || state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
       <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>${t("owner.signedIn")}</small></div><div class="owner-actions"><button id="advanced-settings" class="icon-button" type="button" data-view="advanced" title="${t("owner.advanced")}" aria-label="${t("owner.advanced")}">${icon("settings")}</button><button id="logout" class="icon-button" title="${t("owner.logout")}">${icon("logout")}</button></div></div>
     </aside>
-    ${taskShell ? "" : `<div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>`}
+    ${taskShell || railShell ? "" : `<div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>`}
     ${taskShell ? (options.taskBand || "") : ""}
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
@@ -7487,7 +7557,7 @@ function render(): void {
       other: otherSettingsView,
       mcp: mcpView,
       "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
-      "pet-workbench": () => shell(petWorkbenchView()),
+      "pet-workbench": () => shell(petWorkbenchView(), {railShell: true}),
     };
     content = views[state.view]();
   }
@@ -9550,6 +9620,7 @@ async function performListRefresh(): Promise<void> {
 // A hidden page pauses refresh traffic; on return, one coalesced catch-up runs.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
+  notifyPetDesk("wake");
   void refreshOnboarding();
   resumePetNavigation();
   if (listRefreshScheduler.pending()) listRefreshScheduler.request();
@@ -9568,6 +9639,7 @@ window.addEventListener("pointercancel", () => {
   appPointerActive = false;
   flushDeferredRender();
 });
+window.addEventListener("focus", () => notifyPetDesk("wake"));
 window.addEventListener("blur", () => {
   appPointerActive = false;
   taskListPointerActive = false;
@@ -9606,6 +9678,9 @@ function openGlobalEvents(): void {
       return;
     }
     if (type === "pet_approval") refreshPetApprovalState();
+    // A refresher only exists once the desk chunk has loaded, so the event
+    // classifier is read from the chunk too.
+    if (petDeskRefreshers.size && petDeskPage.loaded()?.petDeskRefreshEvent(type)) notifyPetDesk("event");
     if (eventRefreshesTaskList(type)) {
       refreshListData();
     }
@@ -9618,6 +9693,8 @@ function openGlobalEvents(): void {
   globalEvents.addEventListener("open", () => {
     refreshListData();
     refreshPetApprovalState();
+    // Events may have been missed while disconnected.
+    notifyPetDesk("wake");
     // A background Turn may have queued an open_task while no tab was
     // connected; claim it now that this session has a live event stream.
     resumePetNavigation();
@@ -9767,7 +9844,6 @@ function petWorkbenchView(): string {
     <header class="page-head"><div><h1>${t("petWorkbench.title")}</h1><p>${t("petWorkbench.subtitle")}</p></div></header>
     <div class="pet-workbench-tabs" role="tablist">
       <button type="button" role="tab" class="active" data-pet-workbench-tab="overview">${t("petWorkbench.overview")}</button>
-      <button type="button" role="tab" data-pet-workbench-tab="approvals">${t("petWorkbench.approvals")} <span id="pet-approval-count">${petApprovalCounter.pending > 0 ? petApprovalCounter.pending : ""}</span></button>
       <button type="button" role="tab" data-pet-workbench-tab="records">${t("petWorkbench.records")}</button>
       <button type="button" role="tab" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
     </div>
@@ -9795,8 +9871,9 @@ function showPetWorkbenchBindFailure(error: unknown): void {
   body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => render());
 }
 
-// Legacy bookmarks and the pet panel use "ideas"; the tab is now "approvals".
-// Old five-tab names (core/worklog/inspection/follows) fold into the four tabs.
+// Legacy names fold into the three tabs: "approvals" and "ideas" open the
+// records tab's approval history, and the old five-tab names
+// (core/worklog/inspection/follows) map as before.
 function normalizedPetWorkbenchTab(): string {
   return mapPetWorkbenchTab(petWorkbenchTab);
 }
@@ -9819,12 +9896,14 @@ async function bindPetWorkbenchPage(): Promise<void> {
   if (petWorkbenchPageKeeper.owns(body)) return;
   // Fetch the renderer chunk alongside the workbench data, not after it.
   void petDeskPage.load();
+  // An old approvals/ideas link opens the records tab on its approval history.
+  let recordsAnchor = petWorkbenchTabAnchor(petWorkbenchTab);
   let active = normalizedPetWorkbenchTab();
   petWorkbenchTab = active;
   let view: Awaited<ReturnType<typeof api.petWorkbench>> | null = null;
   let loadError = "";
-  // The approvals tab opens on pending and pages 10 rows at a time; the worklog
-  // keeps its existing 30-row page.
+  // The approval history pages 10 rows at a time; the worklog keeps its
+  // existing 30-row page.
   let approvalLimit = 10;
   let worklogLimit = 30;
   let loadingMore: "approval" | "worklog" | null = null;
@@ -9933,7 +10012,10 @@ async function bindPetWorkbenchPage(): Promise<void> {
         if (controller.signal.aborted && insightsController !== null) return;
         if (!host.isConnected || petWorkbenchPageKeeper.binding !== binding) return;
         // A timeout or failure is not cached: the next overview paint retries.
-        if (value) insights = value;
+        if (value) {
+          insights = value;
+          insightsReadAt = Date.now();
+        }
         paint(value);
       });
   };
@@ -9976,11 +10058,83 @@ async function bindPetWorkbenchPage(): Promise<void> {
       });
   };
 
+  // The overview follows the system: debounced events, a minimum interval,
+  // no stacked reads, a one-minute fallback poll and a 30-second tick for
+  // elapsed times, all only while the overview is showing and the document
+  // is visible. Records and settings stop it.
+  // `binding` and `loader` are assigned below, before the first load; the
+  // refresher only calls these after that.
+  const overviewLive = (): boolean => body.isConnected && petWorkbenchPageKeeper.binding === binding && active === "overview" && !document.hidden;
+  // Created from the route chunk on the first overview paint (the timing
+  // logic lives there, off the first screen).
+  let deskRefresher: PetDeskRefresher | null = null;
+  const ensureDeskRefresher = (module: PetDeskModule): PetDeskRefresher => {
+    if (deskRefresher) return deskRefresher;
+    deskRefresher = module.createPetDeskRefresher({
+      active: overviewLive,
+      refresh: async () => {
+        if (loader.busy()) return;
+        backgroundRead = true;
+        try { await loader.load(); } finally { backgroundRead = false; }
+      },
+      tick: () => module.tickPetDeskElapsed(body, Date.now(), t),
+    });
+    petDeskRefreshers.add(deskRefresher);
+    return deskRefresher;
+  };
+
+  // Freshness of the data on screen and whether the latest background
+  // refresh failed; painted into the desk's status row.
+  let fetchedAt = 0;
+  let refreshFailed = false;
+  let backgroundRead = false;
+  let insightsReadAt = 0;
+  const paintFreshness = (): void => {
+    petDeskPage.loaded()?.paintPetDeskUpdated(body, fetchedAt, refreshFailed);
+  };
+
+  // A background refresh repaints the overview without disturbing what the
+  // owner is doing: every block's scroll position, the open "later" list and
+  // last reply, the focused control and any inline reject input survive, and
+  // an open dialog is left alone (dialogs live outside the body).
+  const repaintOverviewKeepingState = (): void => {
+    const module = petDeskPage.loaded();
+    if (!module) {
+      renderTab();
+      return;
+    }
+    const saved = module.capturePetDeskState(body);
+    const inline = captureInlineDecision();
+    renderTab();
+    module.restorePetDeskState(body, saved, inline === null);
+    if (inline) restoreInlineDecision(inline);
+  };
+  // The inline approve/reject controls on the overview (from the chunk).
+  let deskDecisions: ReturnType<PetDeskModule["createPetDeskDecisions"]> | null = null;
+  const ensureDeskDecisions = (module: PetDeskModule) => {
+    deskDecisions ??= module.createPetDeskDecisions({
+      root: body,
+      resolve: async (approvalID, decision, reason) => {
+        const result = await api.resolvePetApproval(approvalID, decision, reason);
+        await refreshPetPendingApprovalCount(true);
+        if (result.status === "executing") scheduleApprovalExecutionPoll();
+      },
+      done: () => { void load(); },
+    });
+    return deskDecisions;
+  };
+  const captureInlineDecision = (): unknown => deskDecisions?.capture() ?? null;
+  const restoreInlineDecision = (state: unknown): void => {
+    if (state) deskDecisions?.restore(state as Parameters<NonNullable<typeof deskDecisions>["restore"]>[0]);
+  };
+
   const renderTab = () => {
     active = mapPetWorkbenchTab(active);
     if (active !== "overview") {
       insightsController?.abort();
       insightsController = null;
+      // Records and settings do not refresh on a timer.
+      deskRefresher?.stop();
     }
     if (active !== "records") {
       recordsController?.abort();
@@ -10019,15 +10173,33 @@ async function bindPetWorkbenchPage(): Promise<void> {
         statusLabel: taskStatusText,
         desk: view.desk,
         now: Date.now(),
+        // An approval asking for a choice keeps "Review" only: the choice is
+        // made in the detail dialog. The workbench page holds the newest 10
+        // approvals; an older one (not loaded) gets inline buttons only when
+        // its kind cannot carry options.
+        approvalNeedsChoice: approvalID => {
+          const known = view?.approvals.find(item => item.id === approvalID);
+          if (known) return petApprovalOptions(known).length > 0;
+          const need = (view?.desk?.needs_owner || []).find(item => item.approval_id === approvalID);
+          return need?.approval_kind === "owner_decision";
+        },
       });
       deskModule.bindPetDesk(body);
+      ensureDeskDecisions(deskModule).bind();
       bindOverviewActions();
       bindPetWatchActions();
       loadInsights(deskModule);
-    } else if (active === "approvals") {
-      body.innerHTML = (loadError ? renderPetWorkbenchLoadError(loadError, t) : "") + `<div class="pet-approvals-toolbar"><button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button></div><div id="pet-approval-rows-host"></div><div id="pet-approval-more-host"></div>`;
-      body.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
-      renderApprovalRows();
+      paintFreshness();
+      ensureDeskRefresher(deskModule).start();
+      if (petWorkbenchFocusNeeds) {
+        petWorkbenchFocusNeeds = false;
+        // "Handle pending approvals": bring the "for you" list into view and
+        // put focus on it, so the keyboard starts there.
+        const needs = body.querySelector<HTMLElement>("#pet-desk-needs");
+        needs?.scrollIntoView({block: "nearest"});
+        petWorkbenchFocusTarget = needs?.querySelector<HTMLElement>(".pet-desk-scroll") || needs?.querySelector<HTMLElement>("h3[tabindex]") || null;
+        petWorkbenchFocusTarget?.focus({preventScroll: true});
+      }
     } else if (active === "records" && deskModule) {
       if (petRecordsTocOpen === null) {
         // Phones open the records tab on the body, not on a full-height index.
@@ -10048,7 +10220,16 @@ async function bindPetWorkbenchPage(): Promise<void> {
       bindRecordToc();
       bindRecordTocToggle();
       loadRecordsData(deskModule);
+      // The approval history group: the old approvals tab's filters and
+      // paging, inside the records tab.
+      const toolbar = body.querySelector<HTMLElement>("[data-pet-approval-toolbar]");
+      if (toolbar) {
+        toolbar.innerHTML = (loadError ? renderPetWorkbenchLoadError(loadError, t) : "") + `<button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button>`;
+        toolbar.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
+      }
+      renderApprovalRows();
       bindLoadMore();
+      revealRecordsAnchor();
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
       void showPetSettings();
@@ -10068,20 +10249,32 @@ async function bindPetWorkbenchPage(): Promise<void> {
     onData: value => {
       view = value;
       loadingMore = null;
-      // A full reload (event, save, retry) re-reads the last 7 days and the
-      // records data too.
-      insights = undefined;
+      fetchedAt = Date.now();
+      refreshFailed = false;
+      // A full reload (save, retry, tab entry) re-reads the last 7 days and
+      // the records data too. A background overview refresh re-reads the
+      // week at most once a minute.
+      const minimum = petDeskPage.loaded()?.PET_DESK_REFRESH.insightsMinMs ?? 0;
+      if (!backgroundRead || Date.now() - insightsReadAt >= minimum) insights = undefined;
       recordsData = undefined;
       void refreshPetPendingApprovalCount();
-      renderTab();
+      if (backgroundRead && active === "overview") repaintOverviewKeepingState();
+      else renderTab();
       if ((view.approvals || []).some(item => item.status === "executing")) scheduleApprovalExecutionPoll();
     },
     onError: message => {
       loadingMore = null;
       loadError = message;
-      // A failed list refresh keeps the last good approvals on screen; other
-      // tabs keep the original full retry state.
-      if (view && active === "approvals") renderTab();
+      // A failed refresh of the records tab keeps the last good documents and
+      // approval history on screen with an inline error. A failed background
+      // refresh of the overview keeps the desk and says so in the status row;
+      // the refresher tries again on the next event or poll. Other cases keep
+      // the original full retry state.
+      if (view && backgroundRead && active === "overview") {
+        loadError = "";
+        refreshFailed = true;
+        paintFreshness();
+      } else if (view && active === "records") renderTab();
       else {
         view = null;
         showLoadState();
@@ -10092,6 +10285,10 @@ async function bindPetWorkbenchPage(): Promise<void> {
   // Leaving the view releases the binding; that aborts the workbench read and
   // the last-7-days read together.
   const pageRequests = {dispose: () => {
+    if (deskRefresher) {
+      deskRefresher.stop();
+      petDeskRefreshers.delete(deskRefresher);
+    }
     insightsController?.abort();
     insightsController = null;
     recordsController?.abort();
@@ -10099,7 +10296,35 @@ async function bindPetWorkbenchPage(): Promise<void> {
     loader.dispose();
   }};
   binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), pageRequests, active);
-  binding.refresh = () => { if (active === "approvals") refreshApprovals(); };
+  // An approval event while another tab is open cannot patch the hidden
+  // history rows; remember it so entering records re-reads once.
+  let approvalEventMissed = false;
+  binding.refresh = () => {
+    if (active === "records") refreshApprovals();
+    else approvalEventMissed = true;
+  };
+  binding.show = (tab: string) => {
+    if (!body.isConnected || petWorkbenchPageKeeper.binding !== binding) return;
+    const anchor = petWorkbenchTabAnchor(tab);
+    const next = mapPetWorkbenchTab(tab);
+    closePetWorkbenchDialogs();
+    active = next;
+    petWorkbenchTab = next;
+    if (binding) binding.tab = next;
+    if (next !== "records") {
+      renderTab();
+      return;
+    }
+    // Records re-reads its approval history; land on the anchor once the
+    // fresh data has painted, so the repaint does not drop the focus.
+    renderTab();
+    approvalEventMissed = false;
+    void load().then(() => {
+      if (anchor) recordsAnchor = anchor;
+      if (body.isConnected && petWorkbenchPageKeeper.binding === binding && active === "records") revealRecordsAnchor();
+      focusPetWorkbenchTarget();
+    });
+  };
   // Only the tabs that render from the chunk repaint when it settles; the
   // approvals and settings tabs keep their mounted state.
   binding.repaint = () => {
@@ -10107,6 +10332,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
     if (active === "overview" || active === "records") renderTab();
   };
   const load = () => loader.load();
+
 
   // Live approval events use the same loader as user actions. An event during
   // an in-flight request queues exactly one follow-up so a commit that landed
@@ -10256,24 +10482,22 @@ async function bindPetWorkbenchPage(): Promise<void> {
       openApprovalDetail(approvalID, approval);
       return;
     }
-    closePetWorkbenchDialogs();
-    active = "approvals";
-    petWorkbenchTab = active;
-    if (binding) binding.tab = active;
-    renderTab();
+    // Gone or unreadable: show it in the approval history instead.
+    showApprovalHistory();
     void load();
   };
 
   const renderApprovalRows = (): void => {
     if (!view) return;
-    const items = (view.approvals || []).filter(item => petApprovalMatches(item, petApprovalFilter, petApprovalStatusFilter));
-    const filtering = petApprovalFilter !== "all" || (petApprovalStatusFilter !== "all" && petApprovalStatusFilter !== "pending");
+    const deskModule = petDeskPage.loaded();
     const host = body.querySelector<HTMLElement>("#pet-approval-rows-host");
-    if (host) {
-      host.innerHTML = renderPetApprovalList(items, {
+    if (host && deskModule) {
+      const items = (view.approvals || []).filter(item => petApprovalMatches(item, petApprovalFilter, petApprovalStatusFilter));
+      const filtering = petApprovalFilter !== "all" || petApprovalStatusFilter !== "all";
+      host.innerHTML = deskModule.renderPetApprovalHistory(items, {
         translate: petApprovalText,
         now: Date.now(),
-        empty: filtering ? t("petWorkbench.emptyFiltered") : t("petWorkbench.emptyApprovalsPending"),
+        empty: filtering ? t("petWorkbench.emptyFiltered") : deskModule.petRecordsText(t)("petWorkbench.records.approvalsEmpty"),
       });
       host.querySelectorAll<HTMLButtonElement>("[data-pet-approval-open]").forEach(button => {
         button.addEventListener("click", () => openApprovalDetail(button.dataset.petApprovalOpen || ""));
@@ -10328,11 +10552,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
       button.addEventListener("click", () => {
         const jump = button.dataset.petOverviewJump;
         if (jump === "approvals") {
-          closePetWorkbenchDialogs();
-          active = "approvals";
-          petWorkbenchTab = active;
-          if (binding) binding.tab = active;
-          renderTab();
+          // The legacy overview's pending card: the queue is the overview's
+          // "for you" list now, but the legacy overview has none, so it opens
+          // the approval history (filtered to pending).
+          petApprovalStatusFilter = "pending";
+          showApprovalHistory();
         } else if (jump === "channels") {
           switchView("channels");
         } else if (jump === "records") {
@@ -10342,11 +10566,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
           if (binding) binding.tab = active;
           renderTab();
         } else {
-          // The watch list starts collapsed like the other overview sections,
-          // so the jump has to reveal it before scrolling.
+          // The legacy overview's anomaly card jumps to the watch list, which
+          // is always open; bring it into view and move focus to it.
           const follows = document.getElementById("pet-overview-follows");
-          if (follows instanceof HTMLDetailsElement) follows.open = true;
           follows?.scrollIntoView({block: "start", behavior: "smooth"});
+          follows?.querySelector<HTMLElement>(".pet-follow-body[tabindex]")?.focus({preventScroll: true});
         }
       });
     });
@@ -10356,6 +10580,28 @@ async function bindPetWorkbenchPage(): Promise<void> {
     body.querySelectorAll<HTMLButtonElement>("[data-pet-overview-task]").forEach(button => {
       button.addEventListener("click", () => openOverviewTask(button.dataset.petOverviewTask || ""));
     });
+  };
+
+  // showApprovalHistory switches to the records tab and lands on its
+  // approval history group.
+  const showApprovalHistory = (): void => {
+    closePetWorkbenchDialogs();
+    active = "records";
+    petWorkbenchTab = active;
+    recordsAnchor = "pet-record-approvals";
+    if (binding) binding.tab = active;
+    renderTab();
+  };
+
+  // Scroll to and focus the group a request asked for (once per request).
+  const revealRecordsAnchor = (): void => {
+    if (!recordsAnchor) return;
+    const target = document.getElementById(recordsAnchor);
+    if (!target) return;
+    recordsAnchor = "";
+    target.scrollIntoView({block: "start"});
+    petWorkbenchFocusTarget = target.querySelector<HTMLElement>("h3[tabindex]");
+    petWorkbenchFocusTarget?.focus({preventScroll: true});
   };
 
   const bindRecordToc = (): void => {
@@ -10442,9 +10688,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
     closePetWorkbenchDialogs();
     if (binding) binding.tab = active;
     renderTab();
-    // Entering approvals always re-reads, because events that arrived while
-    // another tab was open cannot patch the mounted rows.
-    if (active === "approvals") void load();
+    // Entering records re-reads its approval history when an approval event
+    // arrived while another tab was open: those cannot patch hidden rows.
+    if (active === "records" && approvalEventMissed) {
+      approvalEventMissed = false;
+      void load();
+    }
   }));
   await load();
 }

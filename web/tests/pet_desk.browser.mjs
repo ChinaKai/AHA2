@@ -43,6 +43,15 @@ const allApprovals = [
   ...pageApprovals,
   {id: "a-old", task_id: "pet-task", kind: "owner_decision", title: "是否合并 task-801 的候选", summary: "宠物的理由摘要", risk: "high", status: "pending", created_at: minutesAgo(60)},
 ];
+// ?history=1 serves an approval history of 14 rows in mixed states, paged 10
+// at a time like the server: the records tab's history group must show every
+// status newest first, filter by kind and status, and load the next page.
+const historyApprovals = Array.from({length: 14}, (_, i) => ({
+  id: `h-${String(i).padStart(2, "0")}`, task_id: "pet-task", kind: i % 4 === 0 ? "idea" : "owner_decision",
+  title: `历史审批 ${i}`, summary: "历史", risk: "low",
+  status: ["approved", "rejected", "cancelled", "pending"][i % 4],
+  created_at: minutesAgo(1000 + i * 60), resolved_at: i % 4 === 3 ? "" : minutesAgo(900 + i * 60),
+}));
 const desk = {
   needs_owner: [
     {kind: "blocked", task_id: "t-790", task_code: "task-790", title: "需要一个权限才能继续", detail: "缺少权限", since: minutesAgo(90)},
@@ -112,10 +121,30 @@ const layoutWatches = [
   ...Array.from({length: 20}, (_, i) => ({task_id: `t-un${i}`, code: `task-un${i}`, title: `未关注的任务 ${i}`, status: "active", watched: false, ignored: false, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(80 + i)})),
 ];
 
+// Follow-list sizes for the always-open lists: ?watches=small is watched 1 /
+// ignored 2 / unfollowed 1, ?watches=huge is 200 / 300 / 50.
+const watchSet = (watched, ignored, unfollowed) => [
+  ...Array.from({length: watched}, (_, i) => ({task_id: `t-fw${i}`, code: `task-fw${i}`, title: `关注 ${i}`, status: "active", watched: true, ignored: false, reason: "manual", created_at: minutesAgo(900), updated_at: minutesAgo(30 + i)})),
+  ...Array.from({length: ignored}, (_, i) => ({task_id: `t-fi${i}`, code: `task-fi${i}`, title: `忽略 ${i}`, status: "active", watched: true, ignored: true, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(60 + i)})),
+  ...Array.from({length: unfollowed}, (_, i) => ({task_id: `t-fu${i}`, code: `task-fu${i}`, title: `未关注 ${i}`, status: "active", watched: false, ignored: false, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(80 + i)})),
+];
+const watchSets = {small: watchSet(1, 2, 1), huge: watchSet(200, 300, 50)};
+
+// ?decide=1: approvals of every inline shape on the desk.
+const decideApprovals = [
+  {id: "d-low", task_id: "pet-task", kind: "permission_change", title: "开启渠道管理权限", summary: "低风险", risk: "low", status: "pending", created_at: minutesAgo(50)},
+  {id: "d-high", task_id: "pet-task", kind: "owner_decision", title: "合并高风险分支", summary: "高风险", risk: "high", status: "pending", created_at: minutesAgo(40)},
+  {id: "d-delete", task_id: "pet-task", kind: "delete_workspace", title: "删除旧工作区", summary: "删除", risk: "medium", status: "pending", created_at: minutesAgo(30)},
+  {id: "d-choice", task_id: "pet-task", kind: "owner_decision", title: "选一个方案", summary: "要选", risk: "low", status: "pending", payload: JSON.stringify({options: ["plan_a", "plan_b"]}), created_at: minutesAgo(20)},
+  {id: "d-idea", task_id: "pet-task", kind: "idea", title: "整理想法", summary: "想法", risk: "low", status: "pending", created_at: minutesAgo(10)},
+];
+const decideNeed = item => ({kind: item.kind === "idea" ? "idea" : "approval", approval_id: item.id, approval_kind: item.kind, risk: item.risk, title: item.title, detail: item.summary, since: item.created_at});
+
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const params = new URLSearchParams(location.search);
 const layoutDesks = {owner: ${JSON.stringify(ownerDesk)}, large: ${JSON.stringify(largeDesk)}};
+const watchSets = ${JSON.stringify(watchSets)};
 window.__desk = params.get("desk") === "0" ? undefined : layoutDesks[params.get("desk")] || ${JSON.stringify(desk)};
 const weekInsights = layoutDesks[params.get("desk")] ? ${JSON.stringify(ownerInsights)} : ${JSON.stringify(insights)};
 window.__workbenchQueries = [];
@@ -142,6 +171,21 @@ window.__insightWaiters = [];
 window.__releaseInsights = () => { for (const resolve of window.__insightWaiters.splice(0)) resolve(); };
 const pageApprovals = ${JSON.stringify(pageApprovals)};
 const allApprovals = ${JSON.stringify(allApprovals)};
+const historyApprovals = ${JSON.stringify(historyApprovals)};
+window.__decide = params.get("decide") === "1";
+window.__decideApprovals = ${JSON.stringify(decideApprovals)};
+window.__resolves = [];
+window.__resolveFailNext = false;
+window.__resolveHold = false;
+window.__resolveWaiters = [];
+const decideNeed = ${decideNeed.toString()};
+const decideDesk = () => {
+  const pending = window.__decideApprovals.filter(item => item.status === "pending");
+  // A task with questions sits among the approvals, as on a real desk.
+  const question = ${JSON.stringify(desk.needs_owner.find(item => item.kind === "question"))};
+  return {...${JSON.stringify(desk)}, needs_owner: [question, ...pending.filter(item => item.kind !== "idea").map(decideNeed)], needs_owner_total: pending.filter(item => item.kind !== "idea").length + 1,
+    later: pending.filter(item => item.kind === "idea").map(decideNeed), later_total: pending.filter(item => item.kind === "idea").length};
+};
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
@@ -155,6 +199,16 @@ window.fetch = async (input, init = {}) => {
     return json({ok: true});
   }
   if (path.startsWith("/api/v1/pet/watches/")) (window.__watchWrites ||= []).push([(init.method || "GET").toUpperCase(), decodeURIComponent(path.split("/").pop())]);
+  if (path.startsWith("/api/v1/pet/approvals/") && path.endsWith("/resolve")) {
+    const id = decodeURIComponent(path.split("/")[5]);
+    const body = JSON.parse(init.body || "{}");
+    window.__resolves.push({id, decision: body.decision, note: body.note || ""});
+    if (window.__resolveHold) await new Promise(resolve => window.__resolveWaiters.push(resolve));
+    if (window.__resolveFailNext) { window.__resolveFailNext = false; return json({ok: false, error: "pet_approval_resolve_failed", message: "执行失败：测试"}, 400); }
+    const item = window.__decideApprovals.find(approval => approval.id === id);
+    if (item) item.status = body.decision === "approve" ? "approved" : "rejected";
+    return json({ok: true, status: item?.status});
+  }
   if (path.startsWith("/api/v1/pet/approvals/") && (init.method || "GET").toUpperCase() === "GET") {
     const id = decodeURIComponent(path.split("/")[5]);
     window.__approvalReads.push(id);
@@ -185,11 +239,14 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/pet/workbench") {
     const limit = Number(url.searchParams.get("approval_limit") || 50);
     window.__workbenchQueries.push(limit);
-    const approvals = limit >= 200 ? allApprovals : pageApprovals;
+    if (window.__workbenchFailAfter && window.__workbenchQueries.length > 1) return json({ok: false, error: "workbench_refresh_failed"}, 500);
+    const history = params.get("history") === "1";
+    const approvals = window.__decide ? window.__decideApprovals.slice(0, limit) : history ? historyApprovals.slice(0, limit) : limit >= 200 ? allApprovals : pageApprovals;
+    if (window.__decide) window.__desk = decideDesk();
     return json({
-      ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: allApprovals.length,
-      approval_counts: [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
-      watches: layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}, updated_at: new Date().toISOString(),
+      ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: history ? historyApprovals.length : allApprovals.length,
+      approval_counts: history ? Object.values(historyApprovals.reduce((groups, item) => { const key = (item.kind === "idea" ? "idea" : "owner_decision") + item.status; groups[key] = groups[key] || {kind: item.kind, status: item.status, count: 0}; groups[key].count++; return groups; }, {})) : [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
+      watches: watchSets[params.get("watches")] || (layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}), updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
       channels: [{id: "c-1", name: "Mail", status: "degraded", pending: 3, degraded: true}], channel_total: 1,
       ...(window.__desk ? {desk: window.__desk} : {}),
@@ -208,11 +265,18 @@ window.fetch = async (input, init = {}) => {
   if (path.startsWith("/api/v1/")) return json({ok: true});
   return json({});
 };
+// The global stream can be driven from the test: __emit(type) sends an
+// "update" event, __reopen() fires "open" as after a reconnect.
+window.__sources = [];
 window.EventSource = class {
-  constructor(url) { this.url = String(url); }
-  close() {}
-  addEventListener() {}
+  constructor(url) { this.url = String(url); this.listeners = {}; window.__sources.push(this); }
+  close() { this.closed = true; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
 };
+window.__emit = type => { for (const source of window.__sources) if (!source.closed && source.url.startsWith("/api/v1/events")) for (const fn of source.listeners.update || []) fn({data: JSON.stringify({type, data: {}})}); };
+window.__reopen = () => { for (const source of window.__sources) if (!source.closed && source.url.startsWith("/api/v1/events")) for (const fn of source.listeners.open || []) fn({}); };
+// ?workbench=fail-after makes every workbench read after the first fail.
+window.__workbenchFailAfter = params.get("workbench") === "fail-after";
 sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "pet-workbench"}));
 `;
 
@@ -259,7 +323,9 @@ const url = `http://127.0.0.1:${server.address().port}`;
 // content is marked data-i18n-ignore by the desk renderer.
 const untranslated = page => page.evaluate(() => {
   const body = document.querySelector("#pet-workbench-body");
-  const skip = "[data-i18n-ignore],.pet-watch-row strong,pre,code,textarea,input";
+  // .pet-approval-row-main strong is the approval title (server text) in the
+  // shared approval row, skipped the same way in pet_i18n.browser.mjs.
+  const skip = "[data-i18n-ignore],.pet-watch-row strong,.pet-approval-row-main strong,pre,code,textarea,input";
   const out = [];
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
@@ -378,8 +444,8 @@ try {
   assert.equal(await body.locator("[data-pet-approval-decision]").count(), 0);
 
   // Item 12: after a repaint (tab round trip) the desk buttons still work.
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector("[data-pet-approval-filters-open]");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForSelector("#pet-record-approvals [data-pet-approval-filters-open]");
   await backToOverview(page);
   await body.locator("#pet-desk-pet [data-pet-overview-jump=\"records\"]").click();
   await page.waitForSelector('[data-pet-workbench-tab="records"].active');
@@ -441,8 +507,8 @@ try {
   // back starts one new read and only it fills the block.
   await openOverview(page, "?insights=slow");
   await page.waitForFunction(() => window.__insightReads === 1);
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector("[data-pet-approval-filters-open]");
+  await page.click('[data-pet-workbench-tab="settings"]');
+  await page.waitForSelector("#pet-settings-host");
   assert.equal(await page.evaluate(() => window.__insightSignals.at(-1)?.aborted), true, "leaving the overview aborts the insights read");
   await backToOverview(page);
   await page.waitForFunction(() => window.__insightReads === 2);
@@ -472,12 +538,392 @@ try {
   assert.deepEqual(await untranslated(page), []);
   await body.locator("[data-chunk-retry]").click();
   await body.locator(".pet-desk").waitFor({timeout: 15000});
-  // The approvals tab does not need the chunk at all.
+  // The settings tab does not need the chunk at all.
   deskChunkFailures = 1;
   await page.goto(`${url}/`, {waitUntil: "domcontentloaded"});
   await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector("[data-pet-approval-filters-open]", {timeout: 15000});
+  await page.click('[data-pet-workbench-tab="settings"]');
+  await page.waitForSelector("#pet-settings-host", {timeout: 15000});
+
+  // Round 4, item 2: the approvals tab is gone. Its history is a group of the
+  // records tab, after the corrections, with the same filters and paging;
+  // it shows every status, newest first.
+  const historyPage = await browser.newPage({viewport: {width: 1400, height: 1000}, locale: "en-US"});
+  historyPage.on("pageerror", error => errors.push(error.message));
+  await historyPage.goto(`${url}/?history=1`, {waitUntil: "domcontentloaded"});
+  await historyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  assert.deepEqual(await historyPage.locator("[data-pet-workbench-tab]").evaluateAll(tabs => tabs.map(tab => tab.dataset.petWorkbenchTab)), ["overview", "records", "settings"]);
+  await historyPage.click('[data-pet-workbench-tab="records"]');
+  const history = historyPage.locator("#pet-record-approvals");
+  await history.locator("[data-pet-approval-open]").first().waitFor({timeout: 15000});
+  assert.ok(await historyPage.evaluate(() => {
+    const corrections = document.getElementById("pet-record-corrections").getBoundingClientRect().top;
+    return corrections < document.getElementById("pet-record-approvals").getBoundingClientRect().top;
+  }), "approval history follows the corrections");
+  assert.match(await history.locator(".pet-record-intro").innerText(), /Pending ones are on the overview under “For you”/);
+  const historyIDs = () => history.locator("[data-pet-approval-open]").evaluateAll(rows => rows.map(row => row.dataset.petApprovalOpen));
+  // Ten per page, every status, newest first: a resolved row by when it was
+  // resolved, a pending one by when it was created (h-03 and h-07 are pending
+  // and older than their resolved neighbours).
+  assert.deepEqual(await historyIDs(), ["h-00", "h-01", "h-02", "h-04", "h-03", "h-05", "h-06", "h-08", "h-07", "h-09"]);
+  assert.match(await history.locator(".pet-approval-filter-count").innerText(), /^0$/, "no filter by default");
+  await history.locator("[data-pet-load-more=\"approval\"]").click();
+  await historyPage.waitForFunction(() => document.querySelectorAll("#pet-record-approvals [data-pet-approval-open]").length === 14);
+  // Filter: ideas only, then also pending only.
+  await history.locator("[data-pet-approval-filters-open]").click();
+  await historyPage.click('dialog.pet-approval-filter-dialog [data-pet-approval-filter="idea"]');
+  assert.deepEqual(await historyIDs(), ["h-00", "h-04", "h-08", "h-12"]);
+  await historyPage.click('dialog.pet-approval-filter-dialog [data-pet-approval-status-filter="rejected"]');
+  assert.deepEqual(await historyIDs(), [], "no rejected ideas");
+  assert.match(await history.innerText(), /No matching records\./);
+  await historyPage.click('dialog.pet-approval-filter-dialog [data-pet-approval-filter="all"]');
+  assert.deepEqual(await historyIDs(), ["h-01", "h-05", "h-09", "h-13"]);
+  await historyPage.click("dialog.pet-approval-filter-dialog [data-pet-approval-filters-close]");
+  await historyPage.waitForSelector("dialog.pet-approval-filter-dialog", {state: "detached"});
+  assert.equal(await history.locator(".pet-approval-filter-count").innerText(), "1");
+  // A row opens the existing detail dialog.
+  await history.locator('[data-pet-approval-open="h-05"]').click();
+  await historyPage.waitForSelector("dialog.pet-approval-detail-dialog[open]");
+  assert.match(await historyPage.locator("dialog.pet-approval-detail-dialog").innerText(), /历史审批 5/);
+  await historyPage.click("dialog.pet-approval-detail-dialog [data-pet-approval-detail-close]");
+  assert.deepEqual(await untranslated(historyPage), [], "English approval history");
+  // Old entry points. The command palette's "Open approvals" and the
+  // workbench page entry mean handle what is pending: the overview, with
+  // focus in "For you". "Approval history" opens the records group.
+  const palette = async query => {
+    await historyPage.keyboard.press("Control+k");
+    await historyPage.waitForSelector("#command-palette-input:focus");
+    await historyPage.keyboard.type(query);
+    await historyPage.waitForTimeout(200);
+    await historyPage.keyboard.press("Enter");
+    await historyPage.waitForFunction(() => !document.querySelector("dialog[open]"), null, {timeout: 5000});
+  };
+  await palette("Open approvals");
+  await historyPage.waitForSelector('[data-pet-workbench-tab="overview"].active');
+  await historyPage.waitForFunction(() => document.activeElement?.closest("#pet-desk-needs") !== null);
+  await palette("Approval history");
+  await historyPage.waitForSelector('[data-pet-workbench-tab="records"].active');
+  await historyPage.waitForFunction(() => document.activeElement?.id === "pet-record-approvals-title");
+  // From another page the workbench entry still lands on the overview.
+  await historyPage.locator('.sidebar [data-view="projects"]').click();
+  await historyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await palette("Approvals (Pet workbench)");
+  await historyPage.waitForSelector('#pet-workbench-body .pet-desk', {timeout: 15000});
+  assert.equal(await historyPage.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active");
+  await historyPage.close();
+
+  // Round 4, item 4: Alt+P opens the workbench overview. It works on another
+  // page and inside a text field, does nothing while a dialog (the command
+  // palette) is open or while an IME composes, and prevents the default.
+  const keyPage = await browser.newPage({viewport: {width: 1400, height: 1000}, locale: "en-US"});
+  keyPage.on("pageerror", error => errors.push(error.message));
+  await keyPage.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await keyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  // The shortcut is discoverable: the nav button's name and the palette item.
+  const petNav = keyPage.locator('.sidebar [data-view="pet-workbench"]');
+  assert.match(await petNav.getAttribute("title"), /\(Alt\+P\)$/);
+  assert.equal(await petNav.getAttribute("aria-keyshortcuts"), "Alt+P");
+  await keyPage.click('[data-pet-workbench-tab="records"]');
+  await keyPage.keyboard.press("Alt+KeyP");
+  await keyPage.waitForSelector('[data-pet-workbench-tab="overview"].active', {timeout: 5000});
+  await keyPage.locator('.sidebar [data-view="projects"]').click();
+  await keyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await keyPage.keyboard.press("Alt+KeyP");
+  await keyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 15000});
+  // Inside a text field.
+  await keyPage.locator('.sidebar [data-view="projects"]').click();
+  await keyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await keyPage.evaluate(() => { const input = document.createElement("input"); input.id = "probe-input"; document.body.append(input); input.focus(); });
+  const prevented = await keyPage.evaluate(() => {
+    const event = new KeyboardEvent("keydown", {key: "p", code: "KeyP", altKey: true, bubbles: true, cancelable: true});
+    document.getElementById("probe-input").dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  assert.equal(prevented, true, "the shortcut prevents the default in a text field");
+  await keyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 15000});
+  // A dialog is open: nothing happens.
+  await keyPage.locator('.sidebar [data-view="projects"]').click();
+  await keyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await keyPage.keyboard.press("Control+k");
+  await keyPage.waitForSelector("#command-palette-input:focus");
+  await keyPage.keyboard.press("Alt+KeyP");
+  await keyPage.waitForTimeout(300);
+  assert.equal(await keyPage.locator(".pet-workbench-page").count(), 0, "no navigation behind an open dialog");
+  assert.equal(await keyPage.evaluate(() => document.querySelector("dialog#command-palette")?.open), true);
+  await keyPage.keyboard.press("Escape");
+  // IME composition: nothing happens.
+  const composing = await keyPage.evaluate(() => {
+    const event = new KeyboardEvent("keydown", {key: "Process", code: "KeyP", altKey: true, isComposing: true, bubbles: true, cancelable: true});
+    document.body.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  await keyPage.waitForTimeout(300);
+  assert.equal(composing, false);
+  assert.equal(await keyPage.locator(".pet-workbench-page").count(), 0, "no navigation while composing");
+  // The palette item names the shortcut.
+  await keyPage.keyboard.press("Control+k");
+  await keyPage.keyboard.type("Open pet workbench");
+  await keyPage.waitForTimeout(200);
+  assert.match(await keyPage.locator(".command-palette-option").first().innerText(), /Pet workbench · Alt\+P/);
+  await keyPage.keyboard.press("Escape");
+  await keyPage.close();
+
+  // Round 4, item 5: the overview follows the system. The page's clock is
+  // installed before the app loads so timers can be driven without waiting.
+  const livePage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  livePage.on("pageerror", error => errors.push(error.message));
+  await livePage.clock.install();
+  await livePage.goto(`${url}/?desk=large&watches=huge`, {waitUntil: "domcontentloaded"});
+  await livePage.clock.runFor(2000);
+  await livePage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  const reads = () => livePage.evaluate(() => window.__workbenchQueries.length);
+  assert.match(await livePage.locator("[data-pet-desk-updated]").innerText(), /^Updated \d\d:\d\d:\d\d$/, "the status row shows when the data was fetched");
+  // State the owner made: a scrolled block, an open "later" list, an open
+  // reply, a scrolled follow list.
+  await livePage.locator("#pet-desk-needs .pet-desk-scroll").evaluate(el => { el.scrollTop = 200; });
+  await livePage.locator("#pet-overview-ignored .pet-follow-body").evaluate(el => { el.scrollTop = 300; });
+  await livePage.locator("#pet-desk-later summary").click();
+  await livePage.locator("[data-pet-desk-reply-toggle]").click();
+  const baseReads = await reads();
+  // A burst of ten events (and events the desk ignores) is one read after
+  // the debounce.
+  await livePage.evaluate(() => { for (let i = 0; i < 10; i++) window.__emit(i % 2 ? "turn_running" : "task_status_changed"); window.__emit("pet_state"); window.__emit("pet_action"); });
+  await livePage.clock.runFor(500);
+  assert.equal(await reads(), baseReads, "inside the debounce");
+  await livePage.clock.runFor(1000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length === base + 1, baseReads);
+  await livePage.clock.runFor(4000);
+  assert.equal(await reads(), baseReads + 1, "one read for the burst");
+  // The repaint kept the owner's state.
+  assert.equal(await livePage.locator("#pet-desk-needs .pet-desk-scroll").evaluate(el => el.scrollTop), 200, "block scroll kept");
+  assert.equal(await livePage.locator("#pet-overview-ignored .pet-follow-body").evaluate(el => el.scrollTop), 300, "follow list scroll kept");
+  assert.equal(await livePage.locator("#pet-desk-later").evaluate(el => el.open), true, "later list stays open");
+  assert.equal(await livePage.locator("[data-pet-desk-reply-toggle]").getAttribute("aria-expanded"), "true", "reply stays open");
+  // A dialog stays open through a refresh: the default desk's idea.
+  await livePage.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await livePage.clock.runFor(2000);
+  await livePage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  await livePage.locator("#pet-desk-later summary").click();
+  await livePage.locator('#pet-desk-later .pet-desk-item-main[data-pet-approval-open="idea-1"]').click();
+  await livePage.waitForSelector("dialog.pet-approval-detail-dialog[open]");
+  const dialogReads = await reads();
+  await livePage.evaluate(() => window.__emit("pet_approval"));
+  await livePage.clock.runFor(5000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, dialogReads);
+  assert.equal(await livePage.locator("dialog.pet-approval-detail-dialog[open]").count(), 1, "the detail dialog survives a refresh");
+  await livePage.click("dialog.pet-approval-detail-dialog [data-pet-approval-detail-close]");
+  // The one-minute fallback poll, and reconnect, focus and visibility wakes.
+  let before = await reads();
+  await livePage.clock.runFor(61_000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, before);
+  before = await reads();
+  await livePage.evaluate(() => window.__reopen());
+  await livePage.clock.runFor(4000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, before);
+  before = await reads();
+  await livePage.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await livePage.clock.runFor(4000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, before);
+  // Elapsed labels move on their own every 30 seconds without a read. The
+  // fake clock moves Date.now, so after ten minutes "waited 1 h 30 min" is
+  // "waited 1 h 40 min" before any request.
+  // Mark the node: a repaint would replace it, so a still-marked node with a
+  // new text was updated in place by the tick, not by a read.
+  const firstWait = livePage.locator("#pet-desk-needs .pet-desk-elapsed").first();
+  const waitedBefore = await firstWait.innerText();
+  await firstWait.evaluate(el => { el.dataset.probe = "kept"; });
+  await livePage.clock.runFor(10 * 60_000);
+  const after = await livePage.evaluate(() => {
+    const node = document.querySelector('#pet-desk-needs .pet-desk-elapsed[data-probe="kept"]');
+    return node ? node.textContent : null;
+  });
+  // Ten minutes include polls that repaint; check the tick on a fresh mark.
+  await firstWait.evaluate(el => { el.dataset.probe = "tick"; });
+  const textAtMark = await firstWait.innerText();
+  await livePage.clock.runFor(31_000);
+  const ticked = await livePage.evaluate(() => document.querySelector('#pet-desk-needs .pet-desk-elapsed[data-probe="tick"]')?.textContent ?? null);
+  assert.ok(after !== null || ticked !== null, "an elapsed label was updated in place at least once");
+  assert.notEqual(textAtMark, waitedBefore, `ten minutes later the label moved (${waitedBefore} -> ${textAtMark})`);
+  // The records and settings tabs do not refresh on a timer.
+  await livePage.click('[data-pet-workbench-tab="settings"]');
+  await livePage.waitForSelector("#pet-settings-host");
+  before = await reads();
+  await livePage.clock.runFor(180_000);
+  await livePage.evaluate(() => window.__emit("task_status_changed"));
+  await livePage.clock.runFor(5000);
+  assert.equal(await reads(), before, "no overview refresh from the settings tab");
+  await livePage.close();
+  // A failing refresh keeps the desk and says so; the next try runs again.
+  const failPage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  failPage.on("pageerror", error => errors.push(error.message));
+  await failPage.clock.install();
+  await failPage.goto(`${url}/?workbench=fail-after`, {waitUntil: "domcontentloaded"});
+  await failPage.clock.runFor(2000);
+  await failPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  const stamp = await failPage.locator("[data-pet-desk-updated]").innerText();
+  await failPage.evaluate(() => window.__emit("task_status_changed"));
+  await failPage.clock.runFor(3000);
+  await failPage.waitForFunction(() => document.querySelector("[data-pet-desk-updated]")?.classList.contains("failed"), null, {timeout: 10000});
+  assert.match(await failPage.locator("[data-pet-desk-updated]").innerText(), new RegExp(`^Refresh failed, will retry; showing data from ${stamp.replace("Updated ", "")}$`));
+  assert.equal(await failPage.locator("#pet-workbench-body .pet-desk").count(), 1, "the desk stays on screen");
+  await failPage.close();
+
+  // Round 4, item 6: entering the workbench folds the sidebar to the icon
+  // rail (no task band); leaving restores the full sidebar with the width the
+  // owner dragged and the notes' state. Phones keep the bottom navigation.
+  const railPage = await browser.newPage({viewport: {width: 1440, height: 900}, locale: "en-US"});
+  railPage.on("pageerror", error => errors.push(error.message));
+  await railPage.addInitScript(() => {
+    if (!sessionStorage.getItem("rail-seeded")) {
+      localStorage.setItem("aha2.sidebar-layout", JSON.stringify({width: 300, memoCollapsed: true, memoColor: "graphite"}));
+      sessionStorage.setItem("rail-seeded", "1");
+    }
+  });
+  await railPage.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await railPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  const shellState = () => railPage.evaluate(() => {
+    const shell = document.querySelector(".app-shell");
+    const sidebar = document.querySelector(".sidebar");
+    const visible = el => Boolean(el) && getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0;
+    const pet = document.querySelector('.sidebar [data-view="pet-workbench"]');
+    return {
+      rail: shell.classList.contains("rail-shell"), task: shell.classList.contains("task-shell"),
+      width: Math.round(sidebar.getBoundingClientRect().width), resizer: Boolean(document.querySelector("#sidebar-resizer")),
+      band: Boolean(document.querySelector(".task-band")), memo: visible(document.querySelector(".sidebar-memo")),
+      memoCollapsed: document.querySelector(".sidebar-memo")?.classList.contains("collapsed") ?? null,
+      petActive: pet?.classList.contains("active"), petBadge: pet?.querySelector(".task-tool-badge")?.textContent ?? "", petTitle: pet?.getAttribute("title") || "",
+      labels: [...document.querySelectorAll(".sidebar nav button > span:not(.task-tool-badge)")].some(visible),
+    };
+  });
+  let rail = await shellState();
+  assert.deepEqual([rail.rail, rail.task, rail.width, rail.resizer, rail.band, rail.memo, rail.labels], [true, false, 64, false, false, false, false], `the workbench shows the icon rail: ${JSON.stringify(rail)}`);
+  assert.equal(rail.petActive, true, "the pet entry stays selected");
+  assert.equal(rail.petBadge, "2", "the pending badge stays");
+  assert.match(rail.petTitle, /2 pending approvals \(Alt\+P\)/);
+  // Every workbench tab sits right after the rail (the board fills the
+  // viewport; records and settings are ordinary pages in the same column).
+  for (const tab of ["records", "settings", "overview"]) {
+    await railPage.click(`[data-pet-workbench-tab="${tab}"]`);
+    await railPage.waitForTimeout(150);
+    const box = await railPage.evaluate(() => { const ws = document.querySelector(".workspace").getBoundingClientRect(); return {left: Math.round(ws.left), width: Math.round(ws.width)}; });
+    assert.deepEqual(box, {left: 64, width: 1440 - 64}, `${tab}: the workspace starts right after the rail`);
+  }
+  await railPage.locator('.sidebar [data-view="projects"]').click();
+  await railPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  rail = await shellState();
+  assert.deepEqual([rail.rail, rail.width, rail.resizer, rail.labels, rail.memoCollapsed], [false, 300, true, true, true], `leaving restores the sidebar width and notes state: ${JSON.stringify(rail)}`);
+  await railPage.locator('.sidebar [data-view="pet-workbench"]').click();
+  await railPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 15000});
+  assert.equal((await shellState()).width, 64);
+  // Phone: the bottom navigation, no rail.
+  await railPage.setViewportSize({width: 390, height: 844});
+  assert.equal(await railPage.locator(".bottom-nav").isVisible(), true);
+  assert.equal(await railPage.locator(".sidebar").isVisible(), false);
+  assert.equal(await railPage.locator('.bottom-nav [data-view="pet-workbench"].active').count(), 1);
+  await railPage.close();
+  // The board with the rail at four viewports: no page scroll, block headers
+  // in view. The content cap stays 1600px (wide enough for three columns at
+  // 1920; the rail freed 164px, which widens the board at 1440 and below).
+  const boardPage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  for (const [width, height] of [[1920, 912], [1440, 900], [1366, 768], [1100, 640]]) {
+    await boardPage.setViewportSize({width, height});
+    await boardPage.goto(`${url}/?desk=large&watches=huge`, {waitUntil: "domcontentloaded"});
+    await boardPage.waitForSelector("#pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+    const m = await boardPage.evaluate(() => {
+      const workspace = document.querySelector(".workspace");
+      return {doc: document.documentElement.scrollHeight - innerHeight, workspace: workspace.scrollHeight - workspace.clientHeight, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        rail: Math.round(document.querySelector(".sidebar").getBoundingClientRect().width), page: Math.round(document.querySelector(".pet-workbench-page").getBoundingClientRect().width)};
+    });
+    assert.ok(m.doc <= 0 && m.workspace <= 0 && m.sideways <= 0, `${width}x${height} with the rail does not scroll: ${JSON.stringify(m)}`);
+    assert.equal(m.rail, 64);
+    assert.equal(m.page, Math.min(1600, width - 64), `${width}x${height}: the board uses the freed width up to the 1600px cap`);
+  }
+  await boardPage.close();
+
+  // Round 4, item 3: approve and reject on the desk.
+  const decidePage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  decidePage.on("pageerror", error => errors.push(error.message));
+  await decidePage.clock.install();
+  await decidePage.goto(`${url}/?decide=1`, {waitUntil: "domcontentloaded"});
+  await decidePage.clock.runFor(2000);
+  await decidePage.waitForSelector('#pet-desk-needs [data-pet-desk-approval="d-low"]', {timeout: 20000});
+  const deskRow = id => decidePage.locator(`[data-pet-desk-approval="${id}"]`);
+  const resolves = () => decidePage.evaluate(() => window.__resolves);
+  // The choice approval only offers Review; everything else has both buttons.
+  assert.equal(await deskRow("d-choice").locator("[data-pet-desk-approve], [data-pet-desk-reject]").count(), 0);
+  assert.equal(await deskRow("d-choice").locator('button[data-pet-approval-open="d-choice"]', {hasText: "Review"}).count(), 1);
+  for (const id of ["d-low", "d-high", "d-delete"]) assert.equal(await deskRow(id).locator("[data-pet-desk-approve]").count(), 1, id);
+  // The title still opens the detail.
+  await deskRow("d-low").locator(".pet-desk-item-main").click();
+  await decidePage.waitForSelector("dialog.pet-approval-detail-dialog[open]");
+  await decidePage.click("dialog.pet-approval-detail-dialog [data-pet-approval-detail-close]");
+  // Approve failure: the row says why and the buttons come back.
+  await decidePage.evaluate(() => { window.__resolveFailNext = true; });
+  await deskRow("d-low").locator("[data-pet-desk-approve]").click();
+  await decidePage.waitForFunction(() => document.querySelector('[data-pet-desk-status="d-low"]')?.classList.contains("failed"));
+  assert.match(await deskRow("d-low").locator("[data-pet-desk-status]").innerText(), /^That did not work: 执行失败：测试$/);
+  assert.equal(await deskRow("d-low").locator("[data-pet-desk-approve]").isEnabled(), true, "buttons come back after a failure");
+  // Approve while busy: buttons disabled, "Working…", then the row leaves.
+  await decidePage.evaluate(() => { window.__resolveHold = true; });
+  await deskRow("d-low").locator("[data-pet-desk-approve]").click();
+  await decidePage.waitForFunction(() => document.querySelector('[data-pet-desk-approval="d-low"]')?.getAttribute("aria-busy") === "true");
+  assert.equal(await deskRow("d-low").locator("[data-pet-desk-approve]").isDisabled(), true);
+  assert.equal(await deskRow("d-low").locator("[data-pet-desk-status]").innerText(), "Working…");
+  await deskRow("d-low").locator("[data-pet-desk-approve]").click({force: true});
+  await decidePage.evaluate(() => { window.__resolveHold = false; for (const resolve of window.__resolveWaiters.splice(0)) resolve(); });
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-low"]'), null, {timeout: 10000});
+  assert.deepEqual((await resolves()).map(item => `${item.id}:${item.decision}`), ["d-low:approve", "d-low:approve"], "one failed and one successful approve, no double submit");
+  // High risk: the first click asks, the confirmation folds back by itself.
+  await deskRow("d-high").locator("[data-pet-desk-approve]").click();
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-confirm-yes]").isVisible(), true);
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-status]").innerText(), "Approve?");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-confirm-yes")), true, "focus moves to Confirm");
+  await decidePage.clock.runFor(5100);
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-confirm-yes]").count(), 0, "the confirmation folds back after five seconds");
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-approve]").isVisible(), true);
+  assert.equal((await resolves()).filter(item => item.id === "d-high").length, 0, "no decision without the second click");
+  // "Never mind", then a real confirmation with the keyboard.
+  await deskRow("d-delete").locator("[data-pet-desk-approve]").click();
+  await deskRow("d-delete").locator("[data-pet-desk-confirm-no]").click();
+  assert.equal((await resolves()).filter(item => item.id === "d-delete").length, 0);
+  await deskRow("d-delete").locator("[data-pet-desk-approve]").focus();
+  await decidePage.keyboard.press("Enter");
+  await decidePage.keyboard.press("Enter");
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-delete"]'), null, {timeout: 10000});
+  assert.deepEqual((await resolves()).filter(item => item.id === "d-delete").map(item => item.decision), ["approve"]);
+  // Reject: the reason form, Escape folds it, Enter confirms it.
+  await deskRow("d-high").locator("[data-pet-desk-reject]").click();
+  const reason = deskRow("d-high").locator("[data-pet-desk-reject-reason]");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-reject-reason")), true, "focus moves to the reason");
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-reject-confirm]").isDisabled(), true, "no reject without a reason");
+  await decidePage.keyboard.press("Enter");
+  assert.equal((await resolves()).filter(item => item.id === "d-high").length, 0, "Enter without a reason does not reject");
+  await decidePage.keyboard.press("Escape");
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-reject-form]").count(), 0, "Escape folds the form");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-reject")), true, "focus returns to Reject");
+  await decidePage.keyboard.press("Enter");
+  await reason.fill("先等评审");
+  // A background refresh while typing keeps the form, the text and the focus.
+  const readsBefore = await decidePage.evaluate(() => window.__workbenchQueries.length);
+  await decidePage.evaluate(() => window.__emit("task_status_changed"));
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(base => window.__workbenchQueries.length > base, readsBefore);
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-reject-reason]").inputValue(), "先等评审", "the reason survives a refresh");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-reject-reason")), true, "and keeps the focus");
+  await decidePage.keyboard.type("，下周再说");
+  await decidePage.keyboard.press("Enter");
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-high"]'), null, {timeout: 10000});
+  assert.deepEqual((await resolves()).filter(item => item.id === "d-high"), [{id: "d-high", decision: "reject", note: "先等评审，下周再说"}]);
+  // An idea is approved with one click from the later list.
+  await decidePage.locator("#pet-desk-later summary").click();
+  await deskRow("d-idea").locator("[data-pet-desk-approve]").click();
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-idea"]'), null, {timeout: 10000});
+  assert.deepEqual(await untranslated(decidePage), [], "English inline controls");
+  await decidePage.close();
 
   // Step three, items 9-11: the records tab.
   await openOverview(page);
@@ -487,6 +933,7 @@ try {
   assert.deepEqual(groups, [
     ["pet-record-judgment", "Who it is and how it judges", true],
     ["pet-record-corrections", "Your corrections", true],
+    ["pet-record-approvals", "Approval history", true],
     ["pet-record-promises", "What it promised", true],
     ["pet-record-worklog", "What it did", true],
   ]);
@@ -502,7 +949,7 @@ try {
   // The table of contents follows the groups and still jumps.
   const tocTargets = await page.evaluate(() => [...document.querySelectorAll("#pet-record-toc-nav [data-pet-record-goto]")].map(button => button.dataset.petRecordGoto));
   assert.deepEqual(tocTargets.filter(target => !target.startsWith("pet-record-core-") && !target.startsWith("pet-record-worklog-")),
-    ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"]);
+    ["pet-record-judgment", "pet-record-corrections", "pet-record-approvals", "pet-record-promises", "pet-record-worklog"]);
   await body.locator('#pet-record-toc-nav [data-pet-record-goto="pet-record-promises"]').click();
   // The edit button on a document in a regrouped section still edits and saves it.
   // agenda.md is the fourth core document in the response (index 3); its id
@@ -542,8 +989,6 @@ try {
   await page.click('[data-pet-workbench-tab="records"]');
   await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
   // Overview and back repaints the tab without a reload: the result is reused.
-  // (The approvals tab always reloads the workbench, which also refreshes
-  // the records data; that is the existing approvals behaviour.)
   await page.click('[data-pet-workbench-tab="overview"]');
   await page.click('[data-pet-workbench-tab="records"]');
   assert.equal(await body.locator(".pet-record-correction").count(), 3, "repaint fills from the cached result at once");
@@ -577,7 +1022,7 @@ try {
       sideways: doc.scrollWidth - doc.clientWidth,
       board: getComputedStyle(document.querySelector(".pet-desk-col")).display !== "contents",
       headers: ["pet-desk-needs", "pet-desk-waiting", "pet-desk-pet", "pet-desk-running", "pet-desk-insights"].map(id => inView(box(`#${id} > header`))),
-      follows: [...document.querySelectorAll(".pet-desk-follows > details > summary")].map(el => inView(el.getBoundingClientRect())),
+      follows: [...document.querySelectorAll(".pet-desk-follows > .pet-follow-list > .pet-follow-title")].map(el => inView(el.getBoundingClientRect())),
       columns: ["pet-desk-col-side", "pet-desk-col-main", "pet-desk-col-run"].map(name => Math.round(document.querySelector(`.${name} > section`).getBoundingClientRect().left)),
       stackOrder: [box("#pet-desk-waiting").bottom <= box("#pet-desk-pet").top, box("#pet-desk-running").bottom <= box("#pet-desk-insights").top],
       needs: scroller("pet-desk-needs"), waiting: scroller("pet-desk-waiting"), running: scroller("pet-desk-running"),
@@ -618,10 +1063,9 @@ try {
     assert.equal(await toggle.getAttribute("aria-expanded"), "true");
     assert.equal(await toggle.innerText(), "Collapse");
     assert.match(await reply.locator(".pet-desk-reply-full").innerText(), /\*\*task-813[\s\S]*__其余项目__/, "the full text is the original");
-    await layoutPage.locator("#pet-overview-ignored summary").click();
     let m = await layout(layoutPage);
     fitsBoard(m, `${label} expanded`);
-    assert.ok(await layoutPage.locator("#pet-overview-ignored .pet-overview-other-body").evaluate(el => el.scrollHeight > el.clientHeight && el.getBoundingClientRect().bottom <= innerHeight), `${label}: the open follow list scrolls inside`);
+    assert.ok(await layoutPage.locator("#pet-overview-ignored .pet-overview-other-body").evaluate(el => el.scrollHeight > el.clientHeight && el.getBoundingClientRect().bottom <= innerHeight), `${label}: the follow list scrolls inside`);
     await toggle.click();
     assert.equal(await toggle.getAttribute("aria-expanded"), "false");
     assert.equal(await reply.locator(".pet-desk-reply-full").isHidden(), true);
@@ -644,11 +1088,66 @@ try {
     await layoutPage.keyboard.press("PageDown");
     await layoutPage.waitForFunction(() => document.querySelector("#pet-desk-needs .pet-desk-scroll").scrollTop > 0);
     fitsBoard(await layout(layoutPage), `${label} large scrolled`);
-    await layoutPage.locator("#pet-overview-unfollowed summary").click();
     await layoutPage.locator("[data-pet-desk-reply-toggle]").click();
     fitsBoard(await layout(layoutPage), `${label} large expanded`);
   }
+  // The three follow lists are always open (owner, 2026-11-26). Two data
+  // sizes: watched 1 / ignored 2 / unfollowed 1, and 200 / 300 / 50. The
+  // page never scrolls, each list scrolls under its own title, the longest
+  // list sets the strip height (capped), the shorter lists keep their own
+  // height instead of a mostly empty scroll area, and the three boards above
+  // still show each block's title and at least two rows.
+  const followStrip = page => page.evaluate(() => {
+    const lists = [...document.querySelectorAll(".pet-desk-follows > .pet-follow-list")].map(list => {
+      const body = list.querySelector(".pet-follow-body");
+      const rows = body.querySelectorAll(".pet-watch-row").length;
+      return {height: Math.round(list.getBoundingClientRect().height), rows, scrolls: body.scrollHeight > body.clientHeight + 1, empty: body.scrollHeight - body.clientHeight, title: list.querySelector(".pet-follow-title").getBoundingClientRect().top};
+    });
+    const rowsShown = id => {
+      const scroll = document.querySelector(`#${id} .pet-desk-scroll`);
+      if (!scroll) return 99;
+      const bottom = scroll.getBoundingClientRect().bottom;
+      return [...scroll.querySelectorAll(":scope > ol > li, :scope > ul > li")].filter(li => li.getBoundingClientRect().bottom <= bottom + 1).length;
+    };
+    return {strip: Math.round(document.querySelector(".pet-desk-follows").getBoundingClientRect().height), details: document.querySelectorAll(".pet-desk-follows details, .pet-desk-follows summary").length, lists,
+      shown: ["pet-desk-needs", "pet-desk-waiting", "pet-desk-running", "pet-desk-insights"].map(rowsShown)};
+  });
+  for (const [width, height] of [[1920, 912], [1440, 900], [1366, 768], [1100, 640]]) {
+    for (const set of ["small", "huge"]) {
+      const label = `${width}x${height} follows ${set}`;
+      await layoutPage.setViewportSize({width, height});
+      await layoutPage.goto(`${url}/?desk=large&watches=${set}`, {waitUntil: "domcontentloaded"});
+      await layoutPage.waitForSelector("#pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+      fitsBoard(await layout(layoutPage), label);
+      const f = await followStrip(layoutPage);
+      assert.equal(f.details, 0, `${label}: no collapse control`);
+      assert.ok(f.strip <= Math.max(150, (height - 210) / 4) + 2, `${label}: the strip stays within its cap (${f.strip}px)`);
+      assert.ok(f.shown.every(rows => rows >= 2), `${label}: every block above shows its title and two rows (${f.shown})`);
+      const tallest = Math.max(...f.lists.map(list => list.height));
+      assert.equal(f.strip, tallest, `${label}: the longest list sets the strip height`);
+      for (const list of f.lists) {
+        // A list either fits (no scroll area) or fills the strip and scrolls.
+        assert.ok(!list.scrolls || list.height === tallest, `${label}: a scrolling list is the full strip height`);
+      }
+      if (set === "small") {
+        assert.deepEqual(f.lists.map(list => list.rows), [1, 2, 1]);
+        assert.ok(f.lists[0].height < tallest && f.lists[2].height < tallest || width < 1366, `${label}: the one-row lists are shorter than the two-row list`);
+      } else {
+        assert.deepEqual(f.lists.map(list => list.rows), [200, 300, 50]);
+        assert.ok(f.lists.every(list => list.scrolls), `${label}: every long list scrolls inside`);
+        // Scrolling a list keeps its title where it is and the page still.
+        const ignoredBody = layoutPage.locator("#pet-overview-ignored .pet-follow-body");
+        await ignoredBody.focus();
+        await layoutPage.keyboard.press("End");
+        await layoutPage.waitForFunction(() => document.querySelector("#pet-overview-ignored .pet-follow-body").scrollTop > 0);
+        const after = await followStrip(layoutPage);
+        assert.equal(after.lists[1].title, f.lists[1].title, `${label}: the title does not scroll away`);
+        fitsBoard(await layout(layoutPage), `${label} scrolled`);
+      }
+    }
+  }
   // A follow action still works from the board's follow lists.
+  await openLayout(1920, 912, "owner");
   await layoutPage.locator('#pet-overview-unfollowed [data-pet-watch-follow][data-pet-watch-task="t-un0"]').click();
   await layoutPage.waitForFunction(() => (window.__watchWrites || []).some(([method, id]) => method === "POST" && id === "t-un0"));
   await openLayout(1366, 768, "owner");
@@ -664,6 +1163,12 @@ try {
     assert.ok(m.sideways <= 1, `${width}x${height}: no sideways scroll (${m.sideways}px)`);
     const order = await layoutPage.evaluate(() => ["pet-desk-needs", "pet-desk-waiting", "pet-desk-pet", "pet-desk-insights"].map(id => document.getElementById(id).getBoundingClientRect().top));
     assert.deepEqual([...order].sort((a, b) => a - b), order, `${width}x${height}: for you, waiting, the pet's side, last 7 days top to bottom`);
+    // Stacked: the follow lists are open too, each capped and scrolling
+    // inside, so 550 rows do not stretch the page.
+    await layoutPage.goto(`${url}/?desk=owner&watches=huge`, {waitUntil: "domcontentloaded"});
+    await layoutPage.waitForSelector("#pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+    const stacked = await layoutPage.evaluate(() => [...document.querySelectorAll(".pet-desk-follows .pet-follow-body")].map(body => [body.clientHeight <= innerHeight * 0.4 + 1, body.scrollHeight > body.clientHeight]));
+    assert.deepEqual(stacked, [[true, true], [true, true], [true, true]], `${width}x${height}: stacked lists are capped and scroll inside`);
   }
   assert.deepEqual(await untranslated(layoutPage), [], "English board left untranslated Chinese");
   await layoutPage.close();
@@ -672,7 +1177,7 @@ try {
   await openOverview(page, "?language=zh-CN");
   await page.click('[data-pet-workbench-tab="records"]');
   await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
-  assert.deepEqual(await body.locator(".pet-record-section h3").allInnerTexts(), ["它是谁、怎么判断", "你的纠正", "它答应的事", "它做过的事"]);
+  assert.deepEqual(await body.locator(".pet-record-section h3").allInnerTexts(), ["它是谁、怎么判断", "你的纠正", "审批记录", "它答应的事", "它做过的事"]);
   assert.deepEqual(await body.locator(".pet-record-correction-state").allInnerTexts(), ["还没消化", "已写进原则", "已过期"]);
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);

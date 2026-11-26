@@ -278,6 +278,8 @@ export interface PetWorkbenchPageBinding {
   refresh?: () => void;
   /** Repaint the active tab without a request, e.g. once a route chunk loads. */
   repaint?: () => void;
+  /** Switch the live page to a tab (or legacy tab name) in place. */
+  show?: (tab: string) => void;
 }
 
 export interface PetWorkbenchRenderContext {
@@ -392,19 +394,22 @@ function textValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-/* Four-tab workbench: overview, approvals, records, settings ---------------- */
+/* Three-tab workbench: overview, records, settings --------------------------- */
 
-export type PetWorkbenchTab = "overview" | "approvals" | "records" | "settings";
-export const PET_WORKBENCH_TABS: readonly PetWorkbenchTab[] = ["overview", "approvals", "records", "settings"];
+export type PetWorkbenchTab = "overview" | "records" | "settings";
+export const PET_WORKBENCH_TABS: readonly PetWorkbenchTab[] = ["overview", "records", "settings"];
 
-// Legacy tab names stay routable: "ideas" was the old approvals tab, and the
-// five-tab layout folded core/worklog into records and inspection/follows into
-// overview. Anything unknown falls back to overview, the default tab.
+// Legacy tab names stay routable. The approvals tab (and "ideas", its older
+// name) was removed in task-813: pending approvals live on the overview's
+// "for you" list and the history is a group of the records tab, so an old
+// approvals link lands on the records history. Callers that mean "go handle
+// what is pending" ask for the overview instead (see petWorkbenchIntent). The
+// five-tab layout folded core/worklog into records and inspection/follows
+// into overview. Anything unknown falls back to overview, the default tab.
 export function mapPetWorkbenchTab(value: unknown): PetWorkbenchTab {
   switch (String(value ?? "").trim()) {
     case "approvals":
     case "ideas":
-      return "approvals";
     case "records":
     case "core":
     case "worklog":
@@ -418,4 +423,25 @@ export function mapPetWorkbenchTab(value: unknown): PetWorkbenchTab {
     default:
       return "overview";
   }
+}
+
+// The records tab's element a tab request scrolls to once it renders: an old
+// approvals or ideas link means the approval history group.
+export function petWorkbenchTabAnchor(value: unknown): string {
+  switch (String(value ?? "").trim()) {
+    case "approvals":
+    case "ideas":
+      return "pet-record-approvals";
+    default:
+      return "";
+  }
+}
+
+// The two intents an entry point can have. Handling pending approvals goes
+// to the overview (its "for you" list); looking at past decisions goes to the
+// records tab's approval history.
+export type PetWorkbenchIntent = "handle-pending" | "approval-history";
+
+export function petWorkbenchIntentTab(intent: PetWorkbenchIntent): string {
+  return intent === "handle-pending" ? "overview" : "approvals";
 }

@@ -309,7 +309,7 @@ function fakeTabbedWorkbench() {
       return match ? tabs.get(match[1]) ?? null : null;
     },
   };
-  for (const name of ["overview", "approvals", "records", "settings"]) {
+  for (const name of ["overview", "records", "settings"]) {
     const classes = new Set(name === "overview" ? ["active"] : []);
     tabs.set(name, {
       dataset: {petWorkbenchTab: name},
@@ -372,21 +372,21 @@ test("a programmatic tab change is followed on the preserved page without restar
   assert.equal(requests[0].aborted, false, "following the tab must not abort the request");
 
   // The kept page's listeners still work when the user moves back to overview
-  // and approvals, and each click follows the normal path.
+  // and records, and each click follows the normal path.
   tabs.get("overview").click();
   assert.equal(active, "overview");
   assert.equal(tabs.get("overview").isActive(), true);
   assert.equal(binding.tab, "overview");
-  tabs.get("approvals").click();
-  assert.equal(active, "approvals");
-  assert.equal(tabs.get("approvals").isActive(), true);
-  assert.equal(binding.tab, "approvals");
+  tabs.get("records").click();
+  assert.equal(active, "records");
+  assert.equal(tabs.get("records").isActive(), true);
+  assert.equal(binding.tab, "records");
   assert.equal(requests.length, 1, "tab switches must not issue another request");
 
   // Already on the wanted tab: no extra click (otherwise renders could loop).
-  const approvalClicks = clickCounts.get("approvals");
-  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "approvals"}), page);
-  assert.equal(clickCounts.get("approvals"), approvalClicks, "a matching tab is not clicked again");
+  const recordClicks = clickCounts.get("records");
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "records"}), page);
+  assert.equal(clickCounts.get("records"), recordClicks, "a matching tab is not clicked again");
   assert.equal(requests.length, 1);
 
   // Leaving the view still aborts exactly once.
@@ -649,16 +649,17 @@ test("live pet_approval events refresh the mounted approval list", async () => {
   // The global stream and the reconnect path share one helper.
   assert.match(main, /if \(type === "pet_approval"\) refreshPetApprovalState\(\);/);
   assert.match(main, /function refreshPetApprovalState\(\): void \{[\s\S]*?void refreshPetPendingApprovalCount\(true\);[\s\S]*?petWorkbenchPageKeeper\.binding\?\.refresh\?\.\(\);/);
-  // Only the approvals tab reloads live; entering it re-reads because events
-  // that arrived on another tab cannot patch the mounted rows.
-  assert.match(main, /binding\.refresh = \(\) => \{ if \(active === "approvals"\) refreshApprovals\(\); \};/);
-  assert.match(main, /if \(active === "approvals"\) void load\(\);/);
+  // The approval history now lives on the records tab: it reloads live there,
+  // and entering records re-reads because events that arrived on another tab
+  // cannot patch the mounted rows.
+  assert.match(main, /binding\.refresh = \(\) => \{\s*if \(active === "records"\) refreshApprovals\(\);\s*else approvalEventMissed = true;\s*\};/);
+  assert.match(main, /if \(active === "records" && approvalEventMissed\) \{\s*approvalEventMissed = false;\s*void load\(\);/);
   // An event during an in-flight read queues exactly one follow-up.
   assert.match(main, /if \(approvalRefreshQueued\) return;/);
   assert.match(main, /approvalRefreshQueued = true;/);
   assert.match(main, /void load\(\)\.then\(\(\) => \{\s*approvalRefreshQueued = false;/);
   // A failed refresh keeps the last good list instead of clearing it.
-  assert.match(main, /if \(view && active === "approvals"\) renderTab\(\);/);
+  assert.match(main, /if \(view && active === "records"\) renderTab\(\);/);
   assert.match(main, /loadError \? renderPetWorkbenchLoadError\(loadError, t\) : ""/);
   assert.match(loader, /refresh\?: \(\) => void;/);
   // The resolve path uses the same queued refresh instead of a plain load.
@@ -802,7 +803,9 @@ test("workbench collapses core documents and opens approvals on pending with ten
   assert.match(desk, /entries\.map\(entry => renderCoreEntry\(entry, entry\.index, translate, ledger\)\)/);
   assert.match(desk, /<details class="pet-doc-entry" id="pet-record-core-\$\{index\}">/);
   assert.doesNotMatch(desk, /<details class="pet-doc-entry" open>/);
-  assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
+  // The approval history shows every status by default (the pending queue
+  // is the overview's "for you" list).
+  assert.match(main, /let petApprovalStatusFilter[^=]*= "all";/);
   assert.match(main, /let petApprovalFilter: [^=]+= "all";/);
   assert.match(main, /let approvalLimit = 10;/);
   assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
@@ -983,14 +986,21 @@ test("document editors share one attribute and the approval footer caps at 200",
   assert.match(approvals, /petWorkbench\.pendingFirstHint/);
 });
 
-test("the four workbench tabs default to overview and absorb legacy names", async () => {
-  const {PET_WORKBENCH_TABS} = await import("../build/pet_workbench.js");
-  assert.deepEqual([...PET_WORKBENCH_TABS], ["overview", "approvals", "records", "settings"]);
+test("the three workbench tabs default to overview and absorb legacy names", async () => {
+  const {PET_WORKBENCH_TABS, petWorkbenchTabAnchor, petWorkbenchIntentTab} = await import("../build/pet_workbench.js");
+  assert.deepEqual([...PET_WORKBENCH_TABS], ["overview", "records", "settings"]);
+  // Old approvals links land on the records tab's approval history.
+  assert.equal(petWorkbenchTabAnchor("approvals"), "pet-record-approvals");
+  assert.equal(petWorkbenchTabAnchor("ideas"), "pet-record-approvals");
+  assert.equal(petWorkbenchTabAnchor("records"), "");
+  assert.equal(mapPetWorkbenchTab(petWorkbenchIntentTab("handle-pending")), "overview");
+  assert.equal(mapPetWorkbenchTab(petWorkbenchIntentTab("approval-history")), "records");
+  assert.equal(petWorkbenchTabAnchor(petWorkbenchIntentTab("approval-history")), "pet-record-approvals");
   assert.equal(mapPetWorkbenchTab(undefined), "overview");
   assert.equal(mapPetWorkbenchTab(""), "overview");
   assert.equal(mapPetWorkbenchTab("overview"), "overview");
-  assert.equal(mapPetWorkbenchTab("approvals"), "approvals");
-  assert.equal(mapPetWorkbenchTab("ideas"), "approvals", "legacy idea links open approvals");
+  assert.equal(mapPetWorkbenchTab("approvals"), "records", "the approvals tab is the records history now");
+  assert.equal(mapPetWorkbenchTab("ideas"), "records", "legacy idea links open the history");
   assert.equal(mapPetWorkbenchTab("records"), "records");
   assert.equal(mapPetWorkbenchTab("core"), "records");
   assert.equal(mapPetWorkbenchTab("worklog"), "records");
@@ -1047,17 +1057,19 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   assert.match(html, /data-pet-overview-jump="channels"[^>]*>\s*<strong>1<\/strong>/);
   assert.match(html, /2 channels/);
   assert.match(html, /id="pet-overview-follows"/);
-  assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（2）<\/summary>/);
-  assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
-  const ignoredList = html.match(/<details [^>]*id="pet-overview-ignored"[\s\S]*?<\/details>/)?.[0] ?? "";
-  const unfollowedList = html.match(/<details [^>]*id="pet-overview-unfollowed"[\s\S]*?<\/details>/)?.[0] ?? "";
-  assert.match(ignoredList, /<summary>忽略的任务（1）<\/summary>/);
+  // The three follow lists are always open: a plain heading, no <details>.
+  assert.match(html, /<section class="pet-overview-follows pet-follow-list" id="pet-overview-follows" aria-labelledby="pet-overview-follows-title"><h3 class="pet-follow-title" id="pet-overview-follows-title">关注任务（2）<\/h3>/);
+  assert.doesNotMatch(html, /<details|<summary/);
+  const ignoredList = html.match(/<section [^>]*id="pet-overview-ignored"[\s\S]*?<\/section>/)?.[0] ?? "";
+  const unfollowedList = html.match(/<section [^>]*id="pet-overview-unfollowed"[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.match(ignoredList, /<h3 class="pet-follow-title" id="pet-overview-ignored-title">忽略的任务（1）<\/h3>/);
   assert.match(ignoredList, /data-pet-watch-ignore="false" data-pet-watch-task="t-ignored"/);
   assert.doesNotMatch(ignoredList, /t-unwatched/);
-  assert.match(unfollowedList, /<summary>未关注的任务（1）<\/summary>/);
+  assert.match(unfollowedList, /<h3 class="pet-follow-title" id="pet-overview-unfollowed-title">未关注的任务（1）<\/h3>/);
   assert.match(unfollowedList, /data-pet-watch-ignore="true" data-pet-watch-task="t-unwatched"/);
   assert.doesNotMatch(unfollowedList, /t-ignored/);
-  assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
+  // A list with rows is a keyboard-reachable scroll area under its heading.
+  assert.match(ignoredList, /<div class="pet-overview-other-body pet-follow-body" tabindex="0" aria-labelledby="pet-overview-ignored-title">/);
   assert.match(html, /data-pet-overview-task="t-failed"/);
   assert.match(html, /data-pet-watch-unfollow data-pet-watch-task="t-failed"/, "unfollow is available from the overview");
   assert.match(html, /pet-watch-row anomaly/);
@@ -1085,18 +1097,21 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   );
 });
 
-test("empty watch lists render as collapsed sections with zero counts", () => {
+test("empty watch lists stay open with a one-line empty state and zero counts", () => {
   const html = renderPetOverview({
     watches: [],
     channels: [],
     translate: overviewText,
     formatTime: identityTime,
   });
-  assert.match(html, /class="pet-overview-follows"[^>]*><summary>关注任务（0）<\/summary>/);
-  assert.match(html, /class="pet-overview-other"[^>]*><summary>忽略的任务（0）<\/summary>/);
+  assert.match(html, /id="pet-overview-follows-title">关注任务（0）<\/h3><div class="pet-overview-follows-body pet-follow-body"><div class="field-help pet-follow-empty">暂无关注的任务。<\/div><\/div>/);
+  assert.match(html, /id="pet-overview-ignored-title">忽略的任务（0）<\/h3>/);
   assert.match(html, /没有忽略的任务。/);
-  assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
-  assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
+  // The unfollowed list is always present now, with its own empty line; an
+  // empty list is not a focusable scroll area.
+  assert.match(html, /id="pet-overview-unfollowed-title">未关注的任务（0）<\/h3><div class="pet-overview-other-body pet-follow-body"><div class="field-help pet-follow-empty">/);
+  assert.doesNotMatch(html, /pet-follow-body" tabindex/);
+  assert.doesNotMatch(html, /<details|<summary/);
   assert.doesNotMatch(html, /class="pet-overview-inspection"/);
   assert.doesNotMatch(html, /class="pet-overview-channels"/);
 });
@@ -1179,11 +1194,11 @@ test("records pin core documents above a newest-first worklog with a collapsible
   assert.match(collapsed, /data-pet-record-toc-toggle aria-expanded="false"[^>]*>展开目录</);
 });
 
-test("phones fit four tabs and turn approval dialogs into full-screen sheets", async () => {
+test("phones fit the three tabs and turn approval dialogs into full-screen sheets", async () => {
   const css = await readFile(resolve(root, "web/src/styles.css"), "utf8");
   const mobile = css.slice(css.lastIndexOf("@media (max-width: 640px)"));
   assert.notEqual(mobile, css, "a phone breakpoint must exist");
-  assert.match(mobile, /\.pet-workbench-tabs \{ display: grid; grid-template-columns: repeat\(4, minmax\(0, 1fr\)\); gap: 4px; \}/);
+  assert.match(mobile, /\.pet-workbench-tabs \{ display: grid; grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); gap: 4px; \}/);
   assert.match(mobile, /\.pet-workbench-tabs button \{[^}]*min-width: 0;[^}]*overflow: hidden;/);
   assert.match(mobile, /\.pet-overview-cards \{ grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); gap: 4px; \}/);
   assert.match(mobile, /\.pet-overview-card \{ padding: 6px 8px;/);
@@ -1295,6 +1310,10 @@ const deskFixture = () => ({
   agenda: ["agenda one", "agenda two"],
   agenda_total: 3,
 });
+// The desk's elapsed-time labels are live spans (data-pet-desk-since) that
+// tick in place; the text assertions below read them as plain text.
+const deskText = html => html.replace(/<span class="pet-desk-elapsed" data-pet-desk-since="[^"]*" data-pet-desk-elapsed-key="[^"]*">([^<]*)<\/span>/g, "$1");
+const renderDesk = options => deskText(renderPetOverview(options));
 const deskOptions = (i18n, desk, extra = {}) => ({
   desk,
   inspection: {health: "ok", version: "1.2.3", uptime_minutes: 90, checked_at: "2026-11-26T01:40:00Z"},
@@ -1333,7 +1352,7 @@ test("desk circled numerals start at one and fall back past fifty", async () => 
 test("desk status row uses the *_total counts and flags degraded channels", async () => {
   const i18n = await deskCatalog("zh-CN");
   const desk = deskFixture();
-  let html = renderPetOverview(deskOptions(i18n, desk));
+  let html = renderDesk(deskOptions(i18n, desk));
   const status = html.match(/<section class="pet-desk-status"[\s\S]*?<\/section>/)?.[0] ?? "";
   assert.match(status, /pet-inspection-health ok">正常/);
   assert.match(status, /7 件要你定/, "needs count comes from needs_owner_total, not the 5 rows");
@@ -1342,16 +1361,16 @@ test("desk status row uses the *_total counts and flags degraded channels", asyn
   assert.match(status, /巡检 at 2026-11-26T01:40:00Z/);
   assert.match(status, /title="版本: 1\.2\.3 · 运行时长: 1 小时 30 分钟"/, "version and uptime move to the hover hint");
   assert.doesNotMatch(status, /data-pet-overview-jump="channels"/, "no channel marker without degraded channels");
-  html = renderPetOverview(deskOptions(i18n, desk, {channels: [overviewChannel, {...overviewChannel, id: "c-2", degraded: false}]}));
+  html = renderDesk(deskOptions(i18n, desk, {channels: [overviewChannel, {...overviewChannel, id: "c-2", degraded: false}]}));
   assert.match(html, /<button type="button" class="pet-desk-channel-alert" data-pet-overview-jump="channels">1 个渠道异常<\/button>/);
 });
 
 test("desk needs list keeps the server order, numbers from ① and labels every kind", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const html = renderDesk(deskOptions(i18n, deskFixture()));
   const needs = section(html, "pet-desk-needs");
-  assert.match(needs, /<h3>要你定（7）<\/h3>/);
-  const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)">\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
+  assert.match(needs, /<h3 tabindex="-1">要你定（7）<\/h3>/);
+  const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)"(?: data-pet-desk-approval="[^"]*")?>\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
   assert.deepEqual(order, ["①blocked", "②approval", "③question", "④failed", "⑤stopped"], "rows keep the response order");
   assert.match(needs, /被阻塞 · <span data-i18n-ignore>task-790<\/span> · 等了 1 小时 30 分钟/);
   assert.match(needs, /审批 · <span data-i18n-ignore>task-801<\/span> · 高风险 · 等了 1 小时<\/small>/, "a whole hour drops the zero minutes");
@@ -1363,18 +1382,22 @@ test("desk needs list keeps the server order, numbers from ① and labels every 
   assert.match(needs, /<div class="field-help pet-desk-more">还有 2 条未显示<\/div>/, "truncation uses needs_owner_total");
 });
 
-test("desk rows open tasks and approval details, never resolve approvals", async () => {
+test("desk rows open tasks and approval details, and approvals carry inline approve and reject", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const html = renderDesk(deskOptions(i18n, deskFixture()));
   const needs = section(html, "pet-desk-needs");
   assert.match(needs, /class="pet-desk-item-main" data-pet-overview-task="t-790"/);
   assert.match(needs, /class="pet-desk-item-main" data-pet-approval-open="a-801"/, "an approval opens its detail");
-  assert.match(needs, /<button type="button" data-pet-approval-open="a-801">去处理<\/button><button type="button" data-pet-overview-task="t-801">打开任务<\/button>/);
+  // task-813 round 4: approve and reject sit on the row; the title still
+  // opens the detail. a-801 is high risk, so approve asks once more.
+  assert.match(needs, /<button type="button" class="pet-desk-approve" data-pet-desk-approve="a-801" data-pet-desk-confirm data-i18n-ignore aria-label="批准：Merge task-801\?" data-pet-desk-title="Merge task-801\?">批准<\/button><button type="button" class="pet-desk-reject" data-pet-desk-reject="a-801" data-i18n-ignore aria-label="否决：Merge task-801\?" data-pet-desk-title="Merge task-801\?">否决<\/button><button type="button" data-pet-overview-task="t-801">打开任务<\/button>/);
+  assert.match(needs, /<p class="pet-desk-decision-status" data-pet-desk-status="a-801" role="status" aria-live="polite"><\/p>/);
   assert.match(needs, /data-pet-overview-task="t-813"/);
   const later = html.match(/<details class="pet-desk-later"[\s\S]*?<\/details>/)?.[0] ?? "";
   assert.match(later, /data-pet-approval-open="idea-1"/, "an idea opens the approval detail");
   assert.match(later, /data-pet-overview-task="t-3"/);
-  assert.doesNotMatch(html, /data-pet-approval-decision|data-pet-approval-resolve/, "the desk has no approve or reject button");
+  assert.match(later, /data-pet-desk-approve="idea-1"(?! data-pet-desk-confirm)/, "an idea is approved with one click");
+  assert.doesNotMatch(html, /data-pet-approval-decision|data-pet-approval-resolve/, "the detail dialog's controls are not on the desk");
   assert.match(section(html, "pet-desk-waiting"), /data-pet-overview-jump="channels"/, "a channel row jumps to the channel cards");
   assert.match(section(html, "pet-desk-running"), /data-pet-overview-task="t-811"/);
   assert.match(section(html, "pet-desk-pet"), /data-pet-overview-jump="records"/);
@@ -1382,7 +1405,7 @@ test("desk rows open tasks and approval details, never resolve approvals", async
 
 test("desk later list folds by default with its total and keeps its order", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const html = renderDesk(deskOptions(i18n, deskFixture()));
   const later = html.match(/<details class="pet-desk-later"[^>]*>[\s\S]*?<\/details>/)?.[0] ?? "";
   assert.match(later, /^<details class="pet-desk-later" id="pet-desk-later"><summary>不急的还有 12 件<\/summary>/, "collapsed, titled with later_total");
   assert.ok(later.indexOf("idea-1") < later.indexOf("t-3"), "server order");
@@ -1395,15 +1418,15 @@ test("desk later list folds by default with its total and keeps its order", asyn
 
 test("desk waiting and running columns label every kind and show elapsed time and hardware", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const html = renderDesk(deskOptions(i18n, deskFixture()));
   const waiting = section(html, "pet-desk-waiting");
-  assert.match(waiting, /<h3>等别人（3）<\/h3>/);
+  assert.match(waiting, /<h3 tabindex="-1">等别人（3）<\/h3>/);
   assert.match(waiting, /<strong><span data-i18n-ignore>task-805<\/span> · <span data-i18n-ignore>Reviewed work<\/span><\/strong><small>评审中 → <span data-i18n-ignore>task-806<\/span> · 等了 45 分钟/);
   assert.match(waiting, /<small>审批执行中 · 等了 2 分钟<\/small>/);
   assert.match(waiting, /Feishu group A<\/span><\/strong><small>3 条待发 · 最早一条等了 4 分钟<\/small>/);
   assert.doesNotMatch(waiting, /pet-desk-more/, "not truncated when the total equals the rows");
   const running = section(html, "pet-desk-running");
-  assert.match(running, /<h3>在跑什么（4）<\/h3>/);
+  assert.match(running, /<h3 tabindex="-1">在跑什么（4）<\/h3>/);
   assert.match(running, /task-811<\/span> · <span data-i18n-ignore>Overnight comparison<\/span><\/strong><small>[^<]* · 已跑 12 分钟<\/small>/);
   assert.match(running, /<p class="pet-desk-detail" tabindex="0"><span data-i18n-ignore title="comparing builds">comparing builds<\/span><\/p>/);
   assert.match(running, /<p class="pet-desk-hardware">硬件：<span data-i18n-ignore>Debug board 1<\/span><\/p>/);
@@ -1415,7 +1438,7 @@ test("desk waiting and running columns label every kind and show elapsed time an
 
 test("desk pet side lists corrections, loops and agenda with totals", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const html = renderDesk(deskOptions(i18n, deskFixture()));
   const pet = section(html, "pet-desk-pet");
   assert.match(pet, /<h4>你最近的纠正（1）<\/h4><ul class="pet-desk-ledger"><li><strong><span data-i18n-ignore>Delete workspace X<\/span><\/strong><span class="pet-desk-quote"><span data-i18n-ignore>Keep it for comparison<\/span><\/span><\/li><\/ul>/);
   assert.match(pet, /<h4>未闭环 5 条<\/h4>[\s\S]*loop three[\s\S]*还有 2 条未显示/);
@@ -1425,27 +1448,28 @@ test("desk pet side lists corrections, loops and agenda with totals", async () =
 
 test("desk layout replaces the cards and recent activity but keeps the follow lists", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const html = renderDesk(deskOptions(i18n, deskFixture()));
   const order = ["pet-desk-status", "pet-desk-board", "pet-desk-col-main", "pet-desk-needs", "pet-desk-col-side", "pet-desk-waiting", "pet-desk-pet", "pet-desk-col-run", "pet-desk-running", "pet-desk-insights", "pet-overview-follows", "pet-overview-ignored", "pet-overview-unfollowed"]
     .map(marker => html.indexOf(marker));
   assert.ok(order.every(index => index >= 0), `every block renders: ${order}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, "top-to-bottom order");
   assert.doesNotMatch(html, /pet-overview-cards|pet-overview-card\b|pet-overview-recent|pet-overview-activity/);
-  assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（1）<\/summary>/);
+  assert.match(html, /id="pet-overview-follows-title">关注任务（1）<\/h3>/);
+  assert.doesNotMatch(html, /<details class="pet-overview/);
   assert.match(html, /data-pet-watch-ignore="false" data-pet-watch-task="t-i"/, "follow actions are unchanged");
 });
 
 test("every empty desk block says so, and an empty needs list says nothing waits on the owner", async () => {
   const i18n = await deskCatalog("zh-CN");
   const empty = {needs_owner: [], needs_owner_total: 0, later: [], later_total: 0, waiting_others: [], waiting_others_total: 0, running: [], running_total: 0, corrections: [], open_loops: [], open_loops_total: 0, agenda: [], agenda_total: 0};
-  const html = renderPetOverview(deskOptions(i18n, empty));
+  const html = renderDesk(deskOptions(i18n, empty));
   assert.match(section(html, "pet-desk-needs"), /<div class="field-help pet-desk-empty">现在没有事等你定。<\/div>/);
   assert.match(html, /<summary>不急的还有 0 件<\/summary><div class="pet-desk-later-body"><div class="field-help pet-desk-empty">没有不急的事。<\/div><\/div>/);
   assert.match(section(html, "pet-desk-waiting"), /没有在等别人的事。/);
   assert.match(section(html, "pet-desk-running"), /现在没有任务在跑。/);
   assert.match(section(html, "pet-desk-pet"), /宠物这边没有未闭环的事。/);
   // Sparse or partial payloads (older field sets) must not throw or print undefined.
-  const sparse = renderPetOverview(deskOptions(i18n, {needs_owner: [{kind: "question", title: "x"}]}));
+  const sparse = renderDesk(deskOptions(i18n, {needs_owner: [{kind: "question", title: "x"}]}));
   assert.doesNotMatch(sparse, /undefined|NaN/);
   assert.match(sparse, /要你定（1）/);
 });
@@ -1465,7 +1489,7 @@ test("unknown desk kinds and missing fields fall back to readable labels", async
       corrections: [{title: "", owner_note: "note"}],
       open_loops: [], open_loops_total: 0, agenda: [], agenda_total: 0,
     };
-    const html = renderPetOverview(deskOptions(i18n, desk));
+    const html = renderDesk(deskOptions(i18n, desk));
     assert.doesNotMatch(html, /undefined|null|NaN|petWorkbench\.desk\./, "no raw keys or undefined");
     assert.match(html, /<li class="pet-desk-item kind-brand_new">[\s\S]*?<strong>\(untitled\)<\/strong><small>Needs you<\/small>/);
     assert.match(html, /<li class="pet-desk-item kind-other">[\s\S]*?No kind<\/span><\/strong><small>Needs you<\/small>/);
@@ -1495,7 +1519,7 @@ test("desk escapes every server string", async () => {
     corrections: [{title: evil, owner_note: evil}],
     open_loops: [evil], open_loops_total: 1, agenda: [evil], agenda_total: 1,
   };
-  const html = renderPetOverview(deskOptions(i18n, desk));
+  const html = renderDesk(deskOptions(i18n, desk));
   assert.doesNotMatch(html, /<img|<script|<b>|onerror="/);
   assert.ok(html.split(escaped).length - 1 >= 12, "server strings are escaped in every block");
   assert.match(html, /data-pet-approval-open="a&quot;&gt;&lt;script&gt;"/);
@@ -1516,7 +1540,7 @@ test("without a desk the overview falls back to the pre-desk layout", async () =
 test("the English desk has no Chinese interface copy", async () => {
   const i18n = await deskCatalog("en-US");
   try {
-    const html = renderPetOverview(deskOptions(i18n, deskFixture(), {channels: [overviewChannel]}));
+    const html = renderDesk(deskOptions(i18n, deskFixture(), {channels: [overviewChannel]}));
     // Server content is marked data-i18n-ignore; drop it, then no CJK may remain.
     const chrome = html.replace(/<(\w+)[^>]*data-i18n-ignore[^>]*>[\s\S]*?<\/\1>/g, "");
     assert.doesNotMatch(chrome, /[一-鿿]/, chrome.match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
@@ -1582,13 +1606,13 @@ test("a desk that is an array is treated as no desk", async () => {
   const i18n = await deskCatalog("zh-CN");
   for (const desk of [[], [deskFixture()], "desk", 1]) {
     assert.equal(petDeskPresent(desk), false, JSON.stringify(desk).slice(0, 20));
-    const html = renderPetOverview(deskOptions(i18n, desk));
+    const html = renderDesk(deskOptions(i18n, desk));
     assert.match(html, /class="pet-overview-cards"/, "legacy overview");
     assert.doesNotMatch(html, /pet-desk/);
   }
   assert.equal(petDeskPresent(deskFixture()), true);
   // Rows that are arrays are not records either.
-  const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), needs_owner: [["approval"], {kind: "blocked", task_id: "t", title: "real", since: ""}], needs_owner_total: 2, later: [], later_total: 0}));
+  const html = renderDesk(deskOptions(i18n, {...deskFixture(), needs_owner: [["approval"], {kind: "blocked", task_id: "t", title: "real", since: ""}], needs_owner_total: 2, later: [], later_total: 0}));
   const numbered = section(html, "pet-desk-needs").match(/<span class="pet-desk-index"[^>]*>(.)<\/span>/g) || [];
   assert.deepEqual(numbered.length, 1, "only the object row renders");
   assert.match(section(html, "pet-desk-needs"), /real<\/span>/);
@@ -1600,7 +1624,7 @@ test("loop waits from the pet's ledgers show the item, next step and source file
     {kind: "loop", title: "等合作方答复 <格式>", detail: "周五再问", on: "core/loops.md", since: "0001-01-01T00:00:00Z"},
     {kind: "loop", title: "等渠道恢复", on: "core/agenda.md", since: "0001-01-01T00:00:00Z"},
   ], waiting_others_total: 2};
-  const waiting = section(renderPetOverview(deskOptions(i18n, desk)), "pet-desk-waiting");
+  const waiting = section(renderDesk(deskOptions(i18n, desk)), "pet-desk-waiting");
   assert.match(waiting, /<li class="pet-desk-item kind-loop"><div class="pet-desk-item-body"><button type="button" class="pet-desk-item-main" data-pet-overview-jump="records"><strong><span data-i18n-ignore>等合作方答复 &lt;格式&gt;<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/loops\.md<\/span><\/small><\/button><p class="pet-desk-detail" tabindex="0">下一步：<span data-i18n-ignore title="周五再问">周五再问<\/span><\/p>/);
   assert.match(waiting, /等渠道恢复<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/agenda\.md<\/span><\/small><\/button><\/div><\/li>/, "no next step, no detail line");
   assert.doesNotMatch(waiting, /等了/, "loop waits have no time");
@@ -1608,7 +1632,7 @@ test("loop waits from the pet's ledgers show the item, next step and source file
 
 test("the last reply line shows the wake reply, NOOP copy, or the latest reply", async () => {
   const i18n = await deskCatalog("zh-CN");
-  const render = reply => renderPetOverview(deskOptions(i18n, {...deskFixture(), last_reply: reply}));
+  const render = reply => renderDesk(deskOptions(i18n, {...deskFixture(), last_reply: reply}));
   const line = html => html.match(/<section class="pet-desk-reply"[\s\S]*?<\/section>/)?.[0] ?? "";
   let html = render({text: "推进了 <b>task-1</b>", finished_at: "2026-11-26T01:30:00Z", noop: false, from_wake: true});
   assert.match(line(html), /<strong>宠物上次巡检说<\/strong><span class="pet-desk-reply-text" data-i18n-ignore>推进了 &lt;b&gt;task-1&lt;\/b&gt;<\/span><small>at 2026-11-26T01:30:00Z<\/small>/);
@@ -1630,7 +1654,7 @@ test("a long last reply shows a marker-free one-line preview and the original te
   assert.equal(petDeskReplyPreview("它的 commit `061d1cf` 就是 **task-813**\n\n另外 __watch__ 了"), "它的 commit 061d1cf 就是 task-813 另外 watch 了");
   const i18n = await deskCatalog("zh-CN");
   const text = `把 **0.5.577** 的来源查清了 <b>\`061d1cf\`</b>\n\n${"后面还有很多字。".repeat(40)}`;
-  const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), last_reply: {text, finished_at: "2026-11-26T01:30:00Z", noop: false, from_wake: true}}));
+  const html = renderDesk(deskOptions(i18n, {...deskFixture(), last_reply: {text, finished_at: "2026-11-26T01:30:00Z", noop: false, from_wake: true}}));
   const line = html.match(/<section class="pet-desk-reply"[\s\S]*?<\/section>/)?.[0] ?? "";
   assert.match(line, /<span class="pet-desk-reply-text" data-i18n-ignore>把 0\.5\.577 的来源查清了 &lt;b&gt;061d1cf&lt;\/b&gt; 后面/, "preview drops the markers and escapes");
   assert.match(line, /<button type="button" class="pet-desk-reply-toggle" data-pet-desk-reply-toggle aria-expanded="false" aria-controls="pet-desk-reply-full">展开<\/button>/);
@@ -1671,7 +1695,7 @@ test("the last 7 days block renders counts, outcomes and the token scope", async
   assert.doesNotMatch(renderPetInsightsBody({}, options), /undefined|NaN/);
   assert.match(renderPetInsightsPlaceholder(i18n.t), /data-pet-insights/);
   // The desk renders the placeholder under the pet's side.
-  const desk = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const desk = renderDesk(deskOptions(i18n, deskFixture()));
   assert.ok(desk.indexOf('id="pet-desk-insights"') > desk.indexOf('id="pet-desk-pet"') && desk.indexOf('id="pet-desk-insights"') < desk.indexOf("pet-desk-follows"));
 });
 
@@ -1686,7 +1710,7 @@ test("the English insights, loop waits and last reply have no Chinese interface 
     const english = renderPetInsightsBody({from: "2026-11-18T16:00:00Z", to: "2026-11-26T02:00:00Z", actions: 0, approvals: {}, corrections: 0, wakes: {}}, {translate: i18n.t, formatTime: v => v});
     assert.match(english, /\d{4}-\d\d-\d\d to today<\/small>/);
     assert.doesNotMatch(renderPetInsightsBody(null, {translate: i18n.t, formatTime: v => v}), /[一-鿿]/);
-    const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), waiting_others: [{kind: "loop", title: "等", detail: "下", on: "core/loops.md", since: ""}], waiting_others_total: 1, last_reply: {text: "NOOP", noop: true, from_wake: true, finished_at: "2026-11-26T01:00:00Z"}}));
+    const html = renderDesk(deskOptions(i18n, {...deskFixture(), waiting_others: [{kind: "loop", title: "等", detail: "下", on: "core/loops.md", since: ""}], waiting_others_total: 1, last_reply: {text: "NOOP", noop: true, from_wake: true, finished_at: "2026-11-26T01:00:00Z"}}));
     assert.doesNotMatch(chrome(html), /[一-鿿]/, chrome(html).match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
     assert.match(html, /Nothing to move at the last check/);
     assert.match(html, /Waiting \(pet&#039;s notes\)/);
@@ -1723,38 +1747,40 @@ const recordCore = [
   {name: "principles.md", content: "principles"},
 ];
 
-test("the records page shows four groups in order, each with a one-line intro", async () => {
+test("the records page shows five groups in order, each with a one-line intro", async () => {
   const i18n = await deskCatalog("zh-CN");
   const html = renderPetRecords(recordCore, [{date: "2026-11-25", content: "did"}], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无", tocOpen: true});
-  const ids = ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"];
+  // The approval history (the former approvals tab) follows the corrections.
+  const ids = ["pet-record-judgment", "pet-record-corrections", "pet-record-approvals", "pet-record-promises", "pet-record-worklog"];
   const positions = ids.map(id => html.indexOf(`<section class="pet-record-section" id="${id}"`));
   assert.ok(positions.every(position => position >= 0), `all groups: ${positions}`);
   assert.deepEqual([...positions].sort((a, b) => a - b), positions, "group order");
   for (const [id, title, intro] of [
     ["pet-record-judgment", "它是谁、怎么判断", "宠物的身份和做事准则"],
     ["pet-record-corrections", "你的纠正", "你否决审批时写的原因"],
+    ["pet-record-approvals", "审批记录", "宠物提给你的审批和想法，新的在上，可以按种类和状态筛选。待处理的在概览的“要你定”里。"],
     ["pet-record-promises", "它答应的事", "宠物记下的未闭环事项和自己的议程"],
     ["pet-record-worklog", "它做过的事", "宠物按日期写的工作记录"],
   ]) {
-    const group = html.match(new RegExp(`<section class="pet-record-section" id="${id}">[\\s\\S]*?</section>`))?.[0] ?? "";
-    assert.match(group, new RegExp(`<h3>${title}</h3>\\s*<p class="pet-record-intro">${intro}`), id);
+    const group = html.match(new RegExp(`<section class="pet-record-section" id="${id}"[^>]*>[\\s\\S]*?</section>`))?.[0] ?? "";
+    assert.match(group, new RegExp(`<h3 id="${id}-title" tabindex="-1">${title}</h3>\\s*<p class="pet-record-intro">${intro}`), id);
   }
   // Files land in their group in a fixed order; ids keep the response index.
-  const judgment = html.match(/<section class="pet-record-section" id="pet-record-judgment">[\s\S]*?<\/section>/)[0];
+  const judgment = html.match(/<section class="pet-record-section" id="pet-record-judgment"[^>]*>[\s\S]*?<\/section>/)[0];
   assert.deepEqual([...judgment.matchAll(/data-pet-doc-name="([^"]+)"/g)].map(match => match[1]), ["identity.md", "principles.md", "changes.md"]);
-  const promises = html.match(/<section class="pet-record-section" id="pet-record-promises">[\s\S]*?<\/section>/)[0];
+  const promises = html.match(/<section class="pet-record-section" id="pet-record-promises"[^>]*>[\s\S]*?<\/section>/)[0];
   assert.deepEqual([...promises.matchAll(/data-pet-doc-name="([^"]+)"/g)].map(match => match[1]), ["loops.md", "agenda.md"]);
   assert.match(promises, /id="pet-record-core-0"><summary><span>loops\.md<\/span><span class="pet-record-ledger-slot" data-pet-ledger-counts="loops\.md"><\/span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="loops\.md">/);
   assert.match(judgment, /id="pet-record-core-1"><summary><span>identity\.md<\/span><button type="button" class="pet-doc-edit" data-pet-doc-edit/, "judgment files have no counts slot");
   // The contents mirror the groups.
   const toc = html.match(/<nav id="pet-record-toc-nav">([\s\S]*?)<\/nav>/)[1];
   assert.deepEqual([...toc.matchAll(/data-pet-record-goto="([^"]+)"/g)].map(match => match[1]),
-    ["pet-record-judgment", "pet-record-core-1", "pet-record-core-4", "pet-record-core-3", "pet-record-corrections", "pet-record-promises", "pet-record-core-0", "pet-record-core-2", "pet-record-worklog", "pet-record-worklog-0"]);
+    ["pet-record-judgment", "pet-record-core-1", "pet-record-core-4", "pet-record-core-3", "pet-record-corrections", "pet-record-approvals", "pet-record-promises", "pet-record-core-0", "pet-record-core-2", "pet-record-worklog", "pet-record-worklog-0"]);
   // The knowledge line and corrections start as placeholders.
   assert.ok(html.indexOf("data-pet-record-knowledge") < html.indexOf('id="pet-record-judgment"'), "knowledge line on top");
   assert.match(html, /data-pet-record-corrections/);
   // An unknown core file is not dropped.
-  assert.match(renderPetRecords([{name: "notes.md", content: "x"}], [], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无"}), /<section class="pet-record-section" id="pet-record-judgment">[\s\S]*notes\.md/);
+  assert.match(renderPetRecords([{name: "notes.md", content: "x"}], [], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无"}), /<section class="pet-record-section" id="pet-record-judgment"[^>]*>[\s\S]*notes\.md/);
 });
 
 test("corrections show the three states, newest first, and an empty or failed read", async () => {
@@ -1827,7 +1853,8 @@ test("the English records page has no Chinese interface copy", async () => {
       renderPetLedgerCounts({name: "loops.md", counts: {}, total: 0}, i18n.t),
     ];
     for (const piece of pieces) assert.doesNotMatch(chrome(piece), /[一-鿿]/, chrome(piece).match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
-    assert.match(pieces[0], /<h3>What it promised<\/h3>/);
+    assert.match(pieces[0], /tabindex="-1">What it promised<\/h3>/);
+    assert.match(pieces[0], /tabindex="-1">Approval history<\/h3>/);
     assert.match(pieces[1], /Not absorbed yet[\s\S]*Expired/);
   } finally {
     i18n.applyLocale("zh-CN");
@@ -1842,4 +1869,253 @@ test("the records tab reads its data only when opened and keeps the copy in the 
   assert.match(main, /if \(active !== "records"\) \{\s*recordsController\?\.abort\(\);/);
   assert.match(main, /if \(!knowledgeHost\.isConnected \|\| petWorkbenchPageKeeper\.binding !== binding\) return;/);
   assert.doesNotMatch(i18n, /petWorkbench\.records\./, "records copy is not in the first-screen catalog");
+});
+
+/* Round 4, item 5: live overview refresh ---------------------------------- */
+
+// A fake clock: timers run in time order when advance() passes them.
+function fakeClock() {
+  let now = 0;
+  let id = 0;
+  const timers = new Map();
+  return {
+    now: () => now,
+    setTimer: (callback, ms) => { const handle = ++id; timers.set(handle, {at: now + ms, callback}); return handle; },
+    clearTimer: handle => { timers.delete(handle); },
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        const next = [...timers.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next || next[1].at > end) break;
+        timers.delete(next[0]);
+        now = next[1].at;
+        next[1].callback();
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      now = end;
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    pending: () => timers.size,
+  };
+}
+
+test("the overview refresh event list covers task, turn, round and pet approval events", async () => {
+  const {petDeskRefreshEvent} = await import("../build/pet_desk.js");
+  for (const type of ["task_created", "task_completed", "task_status_changed", "turn_running", "turn_succeeded", "turn_failed", "round_started", "round_interrupted", "pet_approval", "pet_event"]) {
+    assert.equal(petDeskRefreshEvent(type), true, type);
+  }
+  for (const type of ["pet_state", "pet_action", "knowledge_proposal_created", "mail_sent", "agent_usage", "heartbeat", ""]) {
+    assert.equal(petDeskRefreshEvent(type), false, type);
+  }
+});
+
+test("a burst of events refreshes once after the debounce, and reads never stack", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  let reads = 0;
+  let release;
+  const refresher = createPetDeskRefresher({
+    active: () => true, tick: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: () => { reads++; return new Promise(resolve => { release = resolve; }); },
+  });
+  refresher.start();
+  for (let i = 0; i < 10; i++) { refresher.notify(); await clock.advance(100); }
+  assert.equal(reads, 0, "still inside the debounce");
+  await clock.advance(PET_DESK_REFRESH.debounceMs);
+  assert.equal(reads, 1, "one read for the burst");
+  assert.equal(refresher.busy(), true);
+  // More events while the read is in flight queue exactly one follow-up.
+  refresher.notify(); await clock.advance(PET_DESK_REFRESH.debounceMs);
+  refresher.notify(); await clock.advance(PET_DESK_REFRESH.debounceMs);
+  assert.equal(reads, 1, "no second read while one is in flight");
+  release();
+  await clock.advance(0);
+  // The follow-up waits out the minimum interval after the first read began.
+  await clock.advance(PET_DESK_REFRESH.minIntervalMs);
+  assert.equal(reads, 2, "one follow-up after the read settles");
+  release();
+  await clock.advance(PET_DESK_REFRESH.minIntervalMs * 3);
+  assert.equal(reads, 2, "nothing more without new events");
+  refresher.stop();
+});
+
+test("a stream of events that never pauses still refreshes within the bounded wait", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  const starts = [];
+  const refresher = createPetDeskRefresher({
+    active: () => true, tick: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: async () => { starts.push(clock.now()); },
+  });
+  refresher.start();
+  // Several Tasks streaming: an event every half second, for a minute, with
+  // no gap as long as the debounce. A trailing debounce alone would wait for
+  // the 60 s fallback poll.
+  const began = clock.now();
+  for (let i = 0; i < 120; i++) { refresher.notify(); await clock.advance(500); }
+  assert.ok(starts.length >= 10, `refreshed ${starts.length} times in a minute of steady events`);
+  assert.ok(starts[0] - began <= PET_DESK_REFRESH.maxWaitMs, `first refresh after ${starts[0] - began} ms`);
+  for (let i = 1; i < starts.length; i++) {
+    const gap = starts[i] - starts[i - 1];
+    assert.ok(gap <= PET_DESK_REFRESH.maxWaitMs + PET_DESK_REFRESH.debounceMs, `gap ${gap} ms stays near the bounded wait`);
+    assert.ok(gap >= PET_DESK_REFRESH.minIntervalMs, `gap ${gap} ms keeps the minimum interval`);
+  }
+  // A short burst still collapses into one read after the debounce.
+  await clock.advance(PET_DESK_REFRESH.maxWaitMs * 2);
+  const settled = starts.length;
+  for (let i = 0; i < 3; i++) { refresher.notify(); await clock.advance(100); }
+  assert.equal(starts.length, settled, "a new burst starts its own debounce; the earlier stream's wait is not carried over");
+  await clock.advance(PET_DESK_REFRESH.debounceMs);
+  assert.equal(starts.length, settled + 1, "a short burst is one read");
+  refresher.stop();
+});
+
+test("an event during a read that outlasts the minimum interval never starts a second read", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  let reads = 0;
+  let inFlight = 0;
+  let overlap = false;
+  let release;
+  const refresher = createPetDeskRefresher({
+    active: () => true, tick: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: () => {
+      reads++; inFlight++;
+      if (inFlight > 1) overlap = true;
+      return new Promise(resolve => { release = () => { inFlight--; resolve(); }; });
+    },
+  });
+  refresher.start();
+  refresher.wake();
+  await clock.advance(0);
+  assert.equal(reads, 1);
+  // The read is slow: longer than the minimum interval and the bounded wait.
+  for (let i = 0; i < 20; i++) { refresher.notify(); await clock.advance(500); }
+  assert.equal(reads, 1, "events during a slow read queue, they do not start another read");
+  assert.equal(overlap, false);
+  release();
+  // Let the settled read schedule its queued follow-up, then run it.
+  await clock.advance(0);
+  await clock.advance(PET_DESK_REFRESH.debounceMs);
+  assert.equal(reads, 2, "one follow-up once the slow read settles");
+  assert.equal(overlap, false);
+  release();
+  refresher.stop();
+});
+
+test("approval history lists the most recently settled first", async () => {
+  const {sortPetApprovalHistory} = await import("../build/pet_desk.js");
+  const items = [
+    {id: "old", status: "approved", created_at: "2026-11-20T00:00:00Z", resolved_at: "2026-11-20T01:00:00Z"},
+    {id: "pending", status: "pending", created_at: "2026-11-25T00:00:00Z"},
+    {id: "late", status: "rejected", created_at: "2026-11-19T00:00:00Z", resolved_at: "2026-11-26T00:00:00Z"},
+    {id: "bad", status: "cancelled", created_at: "not a time"},
+  ];
+  assert.deepEqual(sortPetApprovalHistory(items).map(item => item.id), ["late", "pending", "old", "bad"]);
+  assert.deepEqual(items.map(item => item.id), ["old", "pending", "late", "bad"], "the input is left untouched");
+});
+
+test("two refreshes keep the minimum interval, wake skips the debounce", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  const starts = [];
+  const refresher = createPetDeskRefresher({
+    active: () => true, tick: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: async () => { starts.push(clock.now()); },
+  });
+  refresher.start();
+  refresher.wake();
+  await clock.advance(0);
+  assert.deepEqual(starts, [0], "wake refreshes immediately");
+  refresher.wake();
+  await clock.advance(100);
+  assert.deepEqual(starts, [0], "a second wake waits for the interval");
+  await clock.advance(PET_DESK_REFRESH.minIntervalMs);
+  assert.deepEqual(starts, [0, PET_DESK_REFRESH.minIntervalMs]);
+  refresher.stop();
+});
+
+test("the fallback poll and the elapsed tick run only while active, and stop clears them", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  let reads = 0, ticks = 0, live = true;
+  const refresher = createPetDeskRefresher({
+    active: () => live, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: async () => { reads++; }, tick: () => { ticks++; },
+  });
+  refresher.start();
+  await clock.advance(PET_DESK_REFRESH.pollMs);
+  assert.equal(reads, 1, "a quiet minute polls once");
+  assert.equal(ticks, 2, "elapsed times tick every 30 seconds without a read");
+  await clock.advance(PET_DESK_REFRESH.pollMs);
+  assert.equal(reads, 2);
+  // Hidden page or another tab: no reads, no ticks.
+  live = false;
+  await clock.advance(PET_DESK_REFRESH.pollMs * 3);
+  assert.equal(reads, 2, "no polling while inactive");
+  assert.equal(ticks, 4, "no ticks while inactive");
+  live = true;
+  refresher.stop();
+  assert.equal(clock.pending(), 0, "stop clears every timer");
+  refresher.notify();
+  await clock.advance(PET_DESK_REFRESH.pollMs);
+  assert.equal(reads, 2, "a stopped refresher ignores events");
+});
+
+test("elapsed labels tick in place without a new read", async () => {
+  const {tickPetDeskElapsed, petDeskClock, paintPetDeskUpdated} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  assert.match(html, /<span class="pet-desk-elapsed" data-pet-desk-since="2026-11-26T00:30:00Z" data-pet-desk-elapsed-key="petWorkbench\.desk\.waited">等了 1 小时 30 分钟<\/span>/);
+  // A minimal DOM stand-in: the tick only reads data attributes and writes text.
+  const node = {dataset: {petDeskSince: "2026-11-26T00:30:00Z", petDeskElapsedKey: "petWorkbench.desk.waited"}, textContent: "等了 1 小时 30 分钟"};
+  const zero = {dataset: {petDeskSince: "0001-01-01T00:00:00Z", petDeskElapsedKey: "petWorkbench.desk.waited"}, textContent: "x"};
+  const root = {querySelectorAll: () => [node, zero]};
+  assert.equal(tickPetDeskElapsed(root, deskNow + 30 * 60_000, i18n.t), 1);
+  assert.equal(node.textContent, "等了 2 小时");
+  assert.equal(zero.textContent, "x", "an unknown time is left alone");
+  assert.equal(petDeskClock(new Date(2026, 10, 26, 9, 5, 7).getTime()), "09:05:07");
+  const stamp = {textContent: "", classList: {on: false, toggle(_name, value) { this.on = value; }}};
+  paintPetDeskUpdated({querySelector: () => stamp}, new Date(2026, 10, 26, 9, 5, 7).getTime(), false);
+  assert.equal(stamp.textContent, "更新于 09:05:07");
+  paintPetDeskUpdated({querySelector: () => stamp}, new Date(2026, 10, 26, 9, 5, 7).getTime(), true);
+  assert.match(stamp.textContent, /刷新失败，稍后会再试；显示的是 09:05:07 的数据/);
+  assert.equal(stamp.classList.on, true);
+});
+
+/* Round 4, item 3: inline approve / reject -------------------------------- */
+
+test("high-risk and delete approvals need a second click; everything else is one click", async () => {
+  const {petDeskApprovalNeedsConfirm, PET_DESK_CONFIRM_MS} = await import("../build/pet_desk.js");
+  const confirm = (approval_kind, risk) => petDeskApprovalNeedsConfirm({approval_kind, risk});
+  // The server's background deletes, other delete_* kinds, and high risk.
+  for (const kind of ["delete_task", "delete_project", "delete_workspace", "delete_model", "delete_models", "delete_skill", "delete_knowledge"]) assert.equal(confirm(kind, "low"), true, kind);
+  assert.equal(confirm("owner_decision", "high"), true);
+  assert.equal(confirm("permission_change", "HIGH"), true, "case-insensitive risk");
+  for (const [kind, risk] of [["owner_decision", "low"], ["owner_decision", "medium"], ["idea", "low"], ["permission_change", ""], ["external_channel_send", "medium"], ["", ""]]) {
+    assert.equal(confirm(kind, risk), false, `${kind}/${risk}`);
+  }
+  assert.equal(PET_DESK_CONFIRM_MS, 5000);
+});
+
+test("an approval that needs a choice has only Review on the desk", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderDesk({...deskOptions(i18n, deskFixture()), approvalNeedsChoice: id => id === "a-801"});
+  const needs = section(html, "pet-desk-needs");
+  assert.match(needs, /<button type="button" data-pet-approval-open="a-801" data-i18n-ignore aria-label="去处理：Merge task-801\?">去处理<\/button>/);
+  assert.doesNotMatch(needs, /data-pet-desk-approve="a-801"|data-pet-desk-reject="a-801"/);
+});
+
+test("the reject form is one labelled line with confirm disabled until there is a reason", async () => {
+  const {renderPetDeskRejectForm} = await import("../build/pet_desk.js");
+  await deskCatalog("en-US");
+  try {
+    const html = renderPetDeskRejectForm("a-1", "Delete <x>");
+    assert.match(html, /<input type="text" data-pet-desk-reject-reason="a-1" data-i18n-ignore aria-label="Reason for rejecting “Delete &lt;x&gt;”" placeholder="Reason \(the pet keeps it; one line\)" maxlength="500" value="" autocomplete="off">/);
+    assert.match(html, /<button type="submit" class="danger" data-pet-desk-reject-confirm="a-1" disabled>Confirm reject<\/button>/);
+    assert.match(html, /<button type="button" data-pet-desk-reject-cancel="a-1">Never mind<\/button>/);
+    assert.match(renderPetDeskRejectForm("a-1", "x", "kept"), /value="kept"[\s\S]*data-pet-desk-reject-confirm="a-1">Confirm reject/, "a restored reason enables confirm");
+  } finally {
+    (await deskCatalog("zh-CN"));
+  }
 });

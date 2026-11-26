@@ -129,7 +129,7 @@ try{
     recentBottom: Math.round(recent.getBoundingClientRect().bottom),
    };
   });
-  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows", "pet-overview-other", "pet-overview-other", "pet-overview-recent"], label);
+  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows pet-follow-list", "pet-overview-other pet-follow-list", "pet-overview-other pet-follow-list", "pet-overview-recent"], label);
   assert.ok(layout.sections.every(section => section.width > 0 && section.height > 0), label + " has an empty section");
   assert.equal(layout.recentBottom, layout.overviewBottom, label + " leaves space below Recent activity");
  };
@@ -140,16 +140,16 @@ try{
  const ignored = workbenchBody.locator("#pet-overview-ignored");
  const unfollowed = workbenchBody.locator("#pet-overview-unfollowed");
  const task520 = '[data-pet-watch-task="unfollowed-task"]';
- assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (1)");
+ // The follow lists are always open (no summary to click): the buttons are
+ // usable right away and the titles count the rows.
+ assert.equal(await ignored.locator(".pet-follow-title").innerText(), "Ignored tasks (1)");
  assert.equal(await ignored.locator(task520).count(), 0);
- await unfollowed.locator("summary").click();
  await unfollowed.locator(task520 + '[data-pet-watch-ignore="true"]').click();
  await ignored.locator(task520 + '[data-pet-watch-ignore="false"]').waitFor({state:"attached"});
- assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (2)");
- await ignored.locator("summary").click();
+ assert.equal(await ignored.locator(".pet-follow-title").innerText(), "Ignored tasks (2)");
  await ignored.locator(task520 + '[data-pet-watch-ignore="false"]').click();
  await unfollowed.locator(task520 + '[data-pet-watch-ignore="true"]').waitFor({state:"attached"});
- assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (1)");
+ assert.equal(await ignored.locator(".pet-follow-title").innerText(), "Ignored tasks (1)");
  assert.equal(await page.locator('[data-pet-workbench-tab="diary"]').count(), 0);
  assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
  const nav = page.locator('button[data-view="pet-workbench"]');
@@ -168,8 +168,10 @@ try{
    assert.match(await button.getAttribute("title"), new RegExp(value+" pending approvals"));
    assert.match(await button.getAttribute("aria-label"), new RegExp(value+" pending approvals"));
   }
-  assert.equal(await page.locator("#pet-approval-count").innerText(),String(value));
  }
+ // The workbench tab badge went with the approvals tab (task-813); only the
+ // navigation badge counts pending approvals.
+ assert.equal(await page.locator("#pet-approval-count").count(),0);
  await setCount(3);
  // Exercise the real global SSE listeners away from the workbench: neither
  // a page reload nor the disabled interval can refresh the badge for this test.
@@ -194,16 +196,17 @@ try{
  await eventCount(5,"open"); // Reconnect catches up to missed approvals.
  await page.locator('.sidebar [data-view="pet-workbench"]').click();
  await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
- assert.equal(await page.locator("#pet-approval-count").innerText(),"5");
+ assert.equal(await nav.first().locator(".task-tool-badge").innerText(),"5");
  await setCount(3);
- await page.locator('[data-pet-workbench-tab="approvals"]').click();
+ await page.locator('[data-pet-workbench-tab="records"]').click();
+ await page.waitForSelector('#pet-record-approvals [data-pet-approval-open="approval-1"]');
  for(const [id,decision,want] of [["approval-1","approve",2],["approval-2","reject",1],["idea-1","cancel",0]]){
   await page.locator('[data-pet-approval-open="'+id+'"]').click();
   await page.waitForSelector("dialog.pet-approval-detail-dialog[open]");
   const handle=async dialog=>dialog.accept("test reason");
   if(decision==="reject")page.once("dialog",handle);
   await page.locator('dialog.pet-approval-detail-dialog [data-pet-approval-decision="'+decision+'"]').click();
-  await page.waitForFunction(want=>document.querySelector("#pet-approval-count")?.textContent===(want?String(want):""),want);
+  await page.waitForFunction(want=>{const badge=document.querySelector('.sidebar [data-view="pet-workbench"] .task-tool-badge');return want?badge?.textContent===String(want):!badge;},want);
   if(decision==="reject")page.removeListener("dialog",handle);
   await page.waitForSelector("dialog.pet-approval-detail-dialog",{state:"detached"});
   assert.equal(await nav.locator(".task-tool-badge").count(),want?2:0);
@@ -215,7 +218,8 @@ try{
  await page.goto(url+"/?legacy=1#pet-diary",{waitUntil:"networkidle"});
  assert.equal(new URL(page.url()).hash,"#pet-workbench");
  await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
- await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="approvals"]')?.click());await page.waitForTimeout(300);await scan("pet approvals");
+ assert.equal(await page.locator('[data-pet-workbench-tab="approvals"]').count(),0,"no approvals tab");
+ await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="records"]')?.click());await page.waitForSelector("#pet-record-approvals [data-pet-approval-filters-open]");await page.waitForTimeout(300);await scan("pet approval history");
  await page.locator("[data-pet-approval-filters-open]").click();
  await page.waitForSelector("dialog.pet-approval-filter-dialog[open]");
  await page.evaluate(()=>document.querySelector('[data-pet-approval-filter="idea"]')?.click());await page.waitForTimeout(200);await scan("pet ideas filter");

@@ -2,14 +2,15 @@
 //
 // Checks against the real built Web bundle with a stubbed API:
 //   - a new pending approval pushed over the global SSE appears in the mounted
-//     approvals list without any reload or manual action;
+//     approval history (records tab, task-813) without any reload or manual
+//     action;
 //   - an approval resolved elsewhere disappears the same way;
 //   - a failed background refresh keeps the last good rows and shows an inline
 //     error instead of clearing the list;
 //   - an ordinary list refresh writes nothing to the #app-status live region,
 //     while a genuinely new approval still announces once (task-495);
 //   - a burst of pet_approval events coalesces into at most one follow-up
-//     request, and entering approvals re-reads events missed on another tab.
+//     request, and entering records re-reads events missed on another tab.
 //
 // Dependencies stay in .tools/web-validation; a machine without that directory
 // can point AHA_PLAYWRIGHT_MODULE / AHA_BROWSER_EXECUTABLE at a local install.
@@ -132,13 +133,20 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   await page.goto(url, {waitUntil: "domcontentloaded"});
-  await page.waitForSelector('[data-pet-workbench-tab="approvals"]', {timeout: 20000});
+  await page.waitForSelector('[data-pet-workbench-tab="records"]', {timeout: 20000});
+  assert.equal(await page.locator('[data-pet-workbench-tab="approvals"]').count(), 0, "the approvals tab is gone");
   // The initial overview load also proves the page is bound; clicking before
   // bindPetWorkbenchPage attaches its tab listeners would be a no-op.
   await page.waitForSelector(".pet-overview", {timeout: 20000});
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector('[data-pet-approval-filters-open]', {timeout: 15000});
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForSelector('#pet-record-approvals [data-pet-approval-filters-open]', {timeout: 15000});
   await page.waitForSelector('[data-pet-approval-open="a-1"]', {timeout: 15000});
+  // The history shows every status by default; this test follows the pending
+  // queue, so narrow it to pending through the real filter dialog.
+  await page.click("#pet-record-approvals [data-pet-approval-filters-open]");
+  await page.click('dialog.pet-approval-filter-dialog [data-pet-approval-status-filter="pending"]');
+  await page.click("dialog.pet-approval-filter-dialog [data-pet-approval-filters-close]");
+  await page.waitForSelector("dialog.pet-approval-filter-dialog", {state: "detached"});
 
   // Record every non-empty write to the persistent live region.
   await page.evaluate(() => {
@@ -203,14 +211,14 @@ try {
   assert.ok(burstReads <= 2, `five approval events caused ${burstReads} workbench reads`);
 
   // Events that arrive on another tab do not patch hidden rows, but entering
-  // approvals re-reads, so the missed approval is there immediately.
+  // records re-reads, so the missed approval is there immediately.
   await page.click('[data-pet-workbench-tab="overview"]');
   await page.waitForSelector(".pet-overview", {timeout: 15000});
   await page.evaluate(() => { window.__approvals.push({id: "a-5", task_id: "pet-task", kind: "delete_task", title: "删除任务五", summary: "删除任务五", reason: "测试", risk: "high", status: "pending", created_at: "2026-11-15T00:04:00Z"}); });
   await emitApproval(page);
   await page.waitForTimeout(300);
   assert.equal(await row(page, "a-5").count(), 0, "the overview must not render approval rows");
-  await page.click('[data-pet-workbench-tab="approvals"]');
+  await page.click('[data-pet-workbench-tab="records"]');
   await row(page, "a-5").waitFor({timeout: 15000});
   assert.ok((await rowIDs(page)).includes("a-5"));
 

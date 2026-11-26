@@ -106,6 +106,8 @@ export function activeCommandItem(sections: CommandSection[], activeIndex: numbe
 
 export interface CommandKeyEvent {
   key: string;
+  /** Physical key ("KeyP"); unlike `key` it does not change with Option on macOS. */
+  code?: string;
   isComposing?: boolean;
   keyCode?: number;
   ctrlKey?: boolean;
@@ -136,6 +138,22 @@ export function isPaletteShortcut(event: CommandKeyEvent): boolean {
   if (event.altKey || event.shiftKey) return false;
   if (!event.ctrlKey && !event.metaKey) return false;
   return String(event.key || "").toLowerCase() === "k";
+}
+
+// The pet workbench shortcut. Alt+P is unassigned in Chrome and Edge on
+// Windows (their Alt+letter keys are D, E and F; Alt+Shift uses A, B, I, N
+// and T) and in this app. Matching the physical key keeps it working on
+// macOS, where Option+P types "π" instead of reporting key "p".
+export const PET_WORKBENCH_SHORTCUT = {code: "KeyP", label: "Alt+P", macLabel: "⌥P"} as const;
+
+export function isPetWorkbenchShortcut(event: CommandKeyEvent): boolean {
+  if (event.isComposing || event.keyCode === 229) return false;
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  return event.code === PET_WORKBENCH_SHORTCUT.code;
+}
+
+export function petWorkbenchShortcutLabel(platform: string): string {
+  return /Mac|iPhone|iPad/.test(platform) ? PET_WORKBENCH_SHORTCUT.macLabel : PET_WORKBENCH_SHORTCUT.label;
 }
 
 // Chinese IME composition keydowns report keyCode 229 in Chrome and set

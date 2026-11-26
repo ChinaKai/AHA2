@@ -3363,7 +3363,7 @@ test("sidebar pages are not duplicated as advanced settings entries", async () =
   const cards = [...main.matchAll(/<article class="panel advanced-tool-card">[^\n]*?data-view="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(cards.sort(), ["data", "mcp", "other", "prompts", "proxy", "sync"]);
   assert.match(main, /resources: \(\) => shell\(renderResourcesPage\(\{/);
-  assert.match(main, /"pet-workbench": \(\) => shell\(petWorkbenchView\(\)\)/);
+  assert.match(main, /"pet-workbench": \(\) => shell\(petWorkbenchView\(\), \{railShell: true\}\)/);
   assert.doesNotMatch(main, /(?:hardware|"pet-workbench"): \(\) => advancedSubview/);
 });
 
@@ -4034,7 +4034,23 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // and one bind call in main.ts. From 061d1cf (228,671 JS + 57,418 CSS =
   // 286,089) the same masked-query, level-5 build measures 228,679 JS +
   // 58,080 CSS = 286,759. Ceil to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 286976;
+  // task-813 round 4 (owner feedback on 0.5.578): open follow lists, the
+  // approvals tab folded into records, inline approve/reject, the Alt+P
+  // shortcut, live overview refresh and the icon-rail sidebar. Renderers and
+  // copy stay in the pet_desk chunk; the first screen gains the routing and
+  // refresh wiring in main.ts and the shared styles. Measured per commit with
+  // the same masked-query, level-5 build from 4812d34 (228,679 JS + 58,080
+  // CSS = 286,759); ceil to the next 256-byte boundary.
+  //   approvals tab into records: 228,948 JS + 58,204 CSS = 287,152.
+  //   Alt+P shortcut: 229,214 JS + 58,204 CSS = 287,418.
+  //   live overview refresh (timing, place keeping and the elapsed tick are
+  //   in the chunk; main.ts keeps the event, visibility and focus hooks):
+  //   229,615 JS + 58,223 CSS = 287,838.
+  //   icon-rail sidebar on the workbench: 229,645 JS + 58,250 CSS = 287,895.
+  //   inline approve / reject (controller and copy in the chunk; main.ts
+  //   wires it, the styles are shared): 229,795 JS + 58,432 CSS = 288,227.
+  //   rail workspace column fix: 229,795 JS + 58,440 CSS = 288,235.
+  const FIRST_SCREEN_GZIP_BUDGET = 288256;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
