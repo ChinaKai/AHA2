@@ -1939,6 +1939,82 @@ test("a burst of events refreshes once after the debounce, and reads never stack
   refresher.stop();
 });
 
+test("a stream of events that never pauses still refreshes within the bounded wait", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  const starts = [];
+  const refresher = createPetDeskRefresher({
+    active: () => true, tick: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: async () => { starts.push(clock.now()); },
+  });
+  refresher.start();
+  // Several Tasks streaming: an event every half second, for a minute, with
+  // no gap as long as the debounce. A trailing debounce alone would wait for
+  // the 60 s fallback poll.
+  const began = clock.now();
+  for (let i = 0; i < 120; i++) { refresher.notify(); await clock.advance(500); }
+  assert.ok(starts.length >= 10, `refreshed ${starts.length} times in a minute of steady events`);
+  assert.ok(starts[0] - began <= PET_DESK_REFRESH.maxWaitMs, `first refresh after ${starts[0] - began} ms`);
+  for (let i = 1; i < starts.length; i++) {
+    const gap = starts[i] - starts[i - 1];
+    assert.ok(gap <= PET_DESK_REFRESH.maxWaitMs + PET_DESK_REFRESH.debounceMs, `gap ${gap} ms stays near the bounded wait`);
+    assert.ok(gap >= PET_DESK_REFRESH.minIntervalMs, `gap ${gap} ms keeps the minimum interval`);
+  }
+  // A short burst still collapses into one read after the debounce.
+  await clock.advance(PET_DESK_REFRESH.maxWaitMs * 2);
+  const settled = starts.length;
+  for (let i = 0; i < 3; i++) { refresher.notify(); await clock.advance(100); }
+  assert.equal(starts.length, settled, "a new burst starts its own debounce; the earlier stream's wait is not carried over");
+  await clock.advance(PET_DESK_REFRESH.debounceMs);
+  assert.equal(starts.length, settled + 1, "a short burst is one read");
+  refresher.stop();
+});
+
+test("an event during a read that outlasts the minimum interval never starts a second read", async () => {
+  const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
+  const clock = fakeClock();
+  let reads = 0;
+  let inFlight = 0;
+  let overlap = false;
+  let release;
+  const refresher = createPetDeskRefresher({
+    active: () => true, tick: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    refresh: () => {
+      reads++; inFlight++;
+      if (inFlight > 1) overlap = true;
+      return new Promise(resolve => { release = () => { inFlight--; resolve(); }; });
+    },
+  });
+  refresher.start();
+  refresher.wake();
+  await clock.advance(0);
+  assert.equal(reads, 1);
+  // The read is slow: longer than the minimum interval and the bounded wait.
+  for (let i = 0; i < 20; i++) { refresher.notify(); await clock.advance(500); }
+  assert.equal(reads, 1, "events during a slow read queue, they do not start another read");
+  assert.equal(overlap, false);
+  release();
+  // Let the settled read schedule its queued follow-up, then run it.
+  await clock.advance(0);
+  await clock.advance(PET_DESK_REFRESH.debounceMs);
+  assert.equal(reads, 2, "one follow-up once the slow read settles");
+  assert.equal(overlap, false);
+  release();
+  refresher.stop();
+});
+
+test("approval history lists the most recently settled first", async () => {
+  const {sortPetApprovalHistory} = await import("../build/pet_desk.js");
+  const items = [
+    {id: "old", status: "approved", created_at: "2026-11-20T00:00:00Z", resolved_at: "2026-11-20T01:00:00Z"},
+    {id: "pending", status: "pending", created_at: "2026-11-25T00:00:00Z"},
+    {id: "late", status: "rejected", created_at: "2026-11-19T00:00:00Z", resolved_at: "2026-11-26T00:00:00Z"},
+    {id: "bad", status: "cancelled", created_at: "not a time"},
+  ];
+  assert.deepEqual(sortPetApprovalHistory(items).map(item => item.id), ["late", "pending", "old", "bad"]);
+  assert.deepEqual(items.map(item => item.id), ["old", "pending", "late", "bad"], "the input is left untouched");
+});
+
 test("two refreshes keep the minimum interval, wake skips the debounce", async () => {
   const {createPetDeskRefresher, PET_DESK_REFRESH} = await import("../build/pet_desk.js");
   const clock = fakeClock();

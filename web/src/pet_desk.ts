@@ -1247,6 +1247,8 @@ export function petDeskRefreshEvent(type: string): boolean {
 export const PET_DESK_REFRESH = {
   /** A burst of events collapses into one refresh this long after the last. */
   debounceMs: 1000,
+  /** A stream of events that never pauses still refreshes this often. */
+  maxWaitMs: 5000,
   /** Two refreshes are at least this far apart. */
   minIntervalMs: 3000,
   /** Fallback refresh while the overview is visible. */
@@ -1283,7 +1285,7 @@ export interface PetDeskRefresher {
 }
 
 // createPetDeskRefresher owns the overview's refresh timing: events are
-// debounced, refreshes keep a minimum interval, a read in flight is never
+// debounced with a bounded wait, refreshes keep a minimum interval, a read in flight is never
 // doubled (one follow-up is queued instead), and a fallback poll and an
 // elapsed-time tick run only while active() holds. Time and timers are
 // injectable so the behaviour is testable without waiting.
@@ -1298,14 +1300,24 @@ export function createPetDeskRefresher(options: PetDeskRefresherOptions): PetDes
   let queued = false;
   let lastStart = Number.NEGATIVE_INFINITY;
   let running = false;
+  // When the oldest event not yet covered by a read arrived. A plain trailing
+  // debounce is pushed back by every new event, so while several Tasks stream
+  // events the desk would only move with the fallback poll; this bounds the
+  // wait.
+  let burstStart: number | null = null;
 
   const clear = (handle: unknown) => { if (handle !== null) clearTimer(handle); };
 
   const run = (): void => {
     pending = null;
-    if (!options.active()) return;
+    if (!options.active()) {
+      burstStart = null;
+      return;
+    }
     if (inFlight) {
+      // The follow-up read covers every event seen so far.
       queued = true;
+      burstStart = null;
       return;
     }
     const wait = lastStart + PET_DESK_REFRESH.minIntervalMs - now();
@@ -1314,6 +1326,7 @@ export function createPetDeskRefresher(options: PetDeskRefresherOptions): PetDes
       return;
     }
     inFlight = true;
+    burstStart = null;
     lastStart = now();
     void Promise.resolve().then(options.refresh).catch(() => undefined).finally(() => {
       inFlight = false;
@@ -1347,7 +1360,9 @@ export function createPetDeskRefresher(options: PetDeskRefresherOptions): PetDes
   return {
     notify() {
       if (!running) return;
-      schedule(PET_DESK_REFRESH.debounceMs);
+      const at = now();
+      if (burstStart === null) burstStart = at;
+      schedule(Math.min(PET_DESK_REFRESH.debounceMs, Math.max(0, burstStart + PET_DESK_REFRESH.maxWaitMs - at)));
     },
     wake() {
       if (!running) return;
@@ -1362,6 +1377,7 @@ export function createPetDeskRefresher(options: PetDeskRefresherOptions): PetDes
     stop() {
       running = false;
       queued = false;
+      burstStart = null;
       clear(pending); clear(poll); clear(tick);
       pending = poll = tick = null;
     },
