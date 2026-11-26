@@ -1370,7 +1370,7 @@ test("desk needs list keeps the server order, numbers from ① and labels every 
   const html = renderDesk(deskOptions(i18n, deskFixture()));
   const needs = section(html, "pet-desk-needs");
   assert.match(needs, /<h3 tabindex="-1">要你定（7）<\/h3>/);
-  const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)">\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
+  const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)"(?: data-pet-desk-approval="[^"]*")?>\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
   assert.deepEqual(order, ["①blocked", "②approval", "③question", "④failed", "⑤stopped"], "rows keep the response order");
   assert.match(needs, /被阻塞 · <span data-i18n-ignore>task-790<\/span> · 等了 1 小时 30 分钟/);
   assert.match(needs, /审批 · <span data-i18n-ignore>task-801<\/span> · 高风险 · 等了 1 小时<\/small>/, "a whole hour drops the zero minutes");
@@ -1382,18 +1382,22 @@ test("desk needs list keeps the server order, numbers from ① and labels every 
   assert.match(needs, /<div class="field-help pet-desk-more">还有 2 条未显示<\/div>/, "truncation uses needs_owner_total");
 });
 
-test("desk rows open tasks and approval details, never resolve approvals", async () => {
+test("desk rows open tasks and approval details, and approvals carry inline approve and reject", async () => {
   const i18n = await deskCatalog("zh-CN");
   const html = renderDesk(deskOptions(i18n, deskFixture()));
   const needs = section(html, "pet-desk-needs");
   assert.match(needs, /class="pet-desk-item-main" data-pet-overview-task="t-790"/);
   assert.match(needs, /class="pet-desk-item-main" data-pet-approval-open="a-801"/, "an approval opens its detail");
-  assert.match(needs, /<button type="button" data-pet-approval-open="a-801">去处理<\/button><button type="button" data-pet-overview-task="t-801">打开任务<\/button>/);
+  // task-813 round 4: approve and reject sit on the row; the title still
+  // opens the detail. a-801 is high risk, so approve asks once more.
+  assert.match(needs, /<button type="button" class="pet-desk-approve" data-pet-desk-approve="a-801" data-pet-desk-confirm data-i18n-ignore aria-label="批准：Merge task-801\?" data-pet-desk-title="Merge task-801\?">批准<\/button><button type="button" class="pet-desk-reject" data-pet-desk-reject="a-801" data-i18n-ignore aria-label="否决：Merge task-801\?" data-pet-desk-title="Merge task-801\?">否决<\/button><button type="button" data-pet-overview-task="t-801">打开任务<\/button>/);
+  assert.match(needs, /<p class="pet-desk-decision-status" data-pet-desk-status="a-801" role="status" aria-live="polite"><\/p>/);
   assert.match(needs, /data-pet-overview-task="t-813"/);
   const later = html.match(/<details class="pet-desk-later"[\s\S]*?<\/details>/)?.[0] ?? "";
   assert.match(later, /data-pet-approval-open="idea-1"/, "an idea opens the approval detail");
   assert.match(later, /data-pet-overview-task="t-3"/);
-  assert.doesNotMatch(html, /data-pet-approval-decision|data-pet-approval-resolve/, "the desk has no approve or reject button");
+  assert.match(later, /data-pet-desk-approve="idea-1"(?! data-pet-desk-confirm)/, "an idea is approved with one click");
+  assert.doesNotMatch(html, /data-pet-approval-decision|data-pet-approval-resolve/, "the detail dialog's controls are not on the desk");
   assert.match(section(html, "pet-desk-waiting"), /data-pet-overview-jump="channels"/, "a channel row jumps to the channel cards");
   assert.match(section(html, "pet-desk-running"), /data-pet-overview-task="t-811"/);
   assert.match(section(html, "pet-desk-pet"), /data-pet-overview-jump="records"/);
@@ -2001,4 +2005,41 @@ test("elapsed labels tick in place without a new read", async () => {
   paintPetDeskUpdated({querySelector: () => stamp}, new Date(2026, 10, 26, 9, 5, 7).getTime(), true);
   assert.match(stamp.textContent, /刷新失败，稍后会再试；显示的是 09:05:07 的数据/);
   assert.equal(stamp.classList.on, true);
+});
+
+/* Round 4, item 3: inline approve / reject -------------------------------- */
+
+test("high-risk and delete approvals need a second click; everything else is one click", async () => {
+  const {petDeskApprovalNeedsConfirm, PET_DESK_CONFIRM_MS} = await import("../build/pet_desk.js");
+  const confirm = (approval_kind, risk) => petDeskApprovalNeedsConfirm({approval_kind, risk});
+  // The server's background deletes, other delete_* kinds, and high risk.
+  for (const kind of ["delete_task", "delete_project", "delete_workspace", "delete_model", "delete_models", "delete_skill", "delete_knowledge"]) assert.equal(confirm(kind, "low"), true, kind);
+  assert.equal(confirm("owner_decision", "high"), true);
+  assert.equal(confirm("permission_change", "HIGH"), true, "case-insensitive risk");
+  for (const [kind, risk] of [["owner_decision", "low"], ["owner_decision", "medium"], ["idea", "low"], ["permission_change", ""], ["external_channel_send", "medium"], ["", ""]]) {
+    assert.equal(confirm(kind, risk), false, `${kind}/${risk}`);
+  }
+  assert.equal(PET_DESK_CONFIRM_MS, 5000);
+});
+
+test("an approval that needs a choice has only Review on the desk", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderDesk({...deskOptions(i18n, deskFixture()), approvalNeedsChoice: id => id === "a-801"});
+  const needs = section(html, "pet-desk-needs");
+  assert.match(needs, /<button type="button" data-pet-approval-open="a-801" data-i18n-ignore aria-label="去处理：Merge task-801\?">去处理<\/button>/);
+  assert.doesNotMatch(needs, /data-pet-desk-approve="a-801"|data-pet-desk-reject="a-801"/);
+});
+
+test("the reject form is one labelled line with confirm disabled until there is a reason", async () => {
+  const {renderPetDeskRejectForm} = await import("../build/pet_desk.js");
+  await deskCatalog("en-US");
+  try {
+    const html = renderPetDeskRejectForm("a-1", "Delete <x>");
+    assert.match(html, /<input type="text" data-pet-desk-reject-reason="a-1" data-i18n-ignore aria-label="Reason for rejecting “Delete &lt;x&gt;”" placeholder="Reason \(the pet keeps it; one line\)" maxlength="500" value="" autocomplete="off">/);
+    assert.match(html, /<button type="submit" class="danger" data-pet-desk-reject-confirm="a-1" disabled>Confirm reject<\/button>/);
+    assert.match(html, /<button type="button" data-pet-desk-reject-cancel="a-1">Never mind<\/button>/);
+    assert.match(renderPetDeskRejectForm("a-1", "x", "kept"), /value="kept"[\s\S]*data-pet-desk-reject-confirm="a-1">Confirm reject/, "a restored reason enables confirm");
+  } finally {
+    (await deskCatalog("zh-CN"));
+  }
 });

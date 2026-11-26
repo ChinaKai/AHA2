@@ -10104,14 +10104,29 @@ async function bindPetWorkbenchPage(): Promise<void> {
       return;
     }
     const saved = module.capturePetDeskState(body);
-    const inline = captureInlineDecision?.() ?? null;
+    const inline = captureInlineDecision();
     renderTab();
     module.restorePetDeskState(body, saved, inline === null);
-    if (inline) restoreInlineDecision?.(inline);
+    if (inline) restoreInlineDecision(inline);
   };
-  // Set by the inline approve/reject controls.
-  let captureInlineDecision: (() => unknown) | null = null;
-  let restoreInlineDecision: ((state: unknown) => void) | null = null;
+  // The inline approve/reject controls on the overview (from the chunk).
+  let deskDecisions: ReturnType<PetDeskModule["createPetDeskDecisions"]> | null = null;
+  const ensureDeskDecisions = (module: PetDeskModule) => {
+    deskDecisions ??= module.createPetDeskDecisions({
+      root: body,
+      resolve: async (approvalID, decision, reason) => {
+        const result = await api.resolvePetApproval(approvalID, decision, reason);
+        await refreshPetPendingApprovalCount(true);
+        if (result.status === "executing") scheduleApprovalExecutionPoll();
+      },
+      done: () => { void load(); },
+    });
+    return deskDecisions;
+  };
+  const captureInlineDecision = (): unknown => deskDecisions?.capture() ?? null;
+  const restoreInlineDecision = (state: unknown): void => {
+    if (state) deskDecisions?.restore(state as Parameters<NonNullable<typeof deskDecisions>["restore"]>[0]);
+  };
 
   const renderTab = () => {
     active = mapPetWorkbenchTab(active);
@@ -10158,8 +10173,19 @@ async function bindPetWorkbenchPage(): Promise<void> {
         statusLabel: taskStatusText,
         desk: view.desk,
         now: Date.now(),
+        // An approval asking for a choice keeps "Review" only: the choice is
+        // made in the detail dialog. The workbench page holds the newest 10
+        // approvals; an older one (not loaded) gets inline buttons only when
+        // its kind cannot carry options.
+        approvalNeedsChoice: approvalID => {
+          const known = view?.approvals.find(item => item.id === approvalID);
+          if (known) return petApprovalOptions(known).length > 0;
+          const need = (view?.desk?.needs_owner || []).find(item => item.approval_id === approvalID);
+          return need?.approval_kind === "owner_decision";
+        },
       });
       deskModule.bindPetDesk(body);
+      ensureDeskDecisions(deskModule).bind();
       bindOverviewActions();
       bindPetWatchActions();
       loadInsights(deskModule);

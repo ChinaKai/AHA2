@@ -129,6 +129,8 @@ export interface PetOverviewOptions {
   now?: number;
   /** The desk view; absent means an older server or a failed desk read. */
   desk?: PetDesk | null;
+  /** True for an approval that needs a choice in the detail dialog first. */
+  approvalNeedsChoice?: (approvalID: string) => boolean;
 }
 
 function overviewStatusLabel(status: string, options: PetOverviewOptions): string {
@@ -450,10 +452,61 @@ function deskOpenTaskButton(taskID: string, translate: Translate): string {
   return `<button type="button" data-pet-overview-task="${escapeHTML(taskID)}">${escapeHTML(translate("petWorkbench.desk.openTask"))}</button>`;
 }
 
+/* Inline approve / reject (task-813 round 4) ------------------------------ */
+
+// Approval kinds the server runs as a background delete
+// (petApprovalRunsInBackground in internal/app/pet_delegate.go).
+const PET_DESK_HEAVY_DELETES = ["delete_task", "delete_project", "delete_workspace"];
+
+// petDeskApprovalNeedsConfirm decides which approvals need a second click on
+// the desk: a high-risk approval, or one that deletes something directly
+// (the server's background deletes and any other delete_* kind). Everything
+// else is approved with one click.
+export function petDeskApprovalNeedsConfirm(item: {approval_kind?: unknown; risk?: unknown}): boolean {
+  const kind = textValue(item.approval_kind);
+  const risk = textValue(item.risk).toLowerCase();
+  return risk === "high" || PET_DESK_HEAVY_DELETES.includes(kind) || kind.startsWith("delete_");
+}
+
+// How long the "Approve?" confirmation waits before it folds back.
+export const PET_DESK_CONFIRM_MS = 5000;
+
+export interface PetDeskApprovalChoice {
+  /** The approval needs a choice in the detail dialog before it can be approved. */
+  needsChoice: boolean;
+}
+
+// The inline controls for one approval or idea row. An approval that asks for
+// a choice gets only "Review" (the choice is made in the detail dialog). The
+// buttons' names include the approval title (server text), so they carry
+// data-i18n-ignore like other desk text; their own words are already in the
+// page's language.
+function deskDecisionControls(approvalID: string, title: string, needsChoice: boolean, confirm: boolean, translate: Translate): string {
+  const id = escapeHTML(approvalID);
+  const name = escapeHTML(title);
+  if (needsChoice) {
+    return `<button type="button" data-pet-approval-open="${id}" data-i18n-ignore aria-label="${escapeHTML(deskCopy("reviewNamed", {title}))}">${escapeHTML(translate("petWorkbench.desk.review"))}</button>`;
+  }
+  return `<button type="button" class="pet-desk-approve" data-pet-desk-approve="${id}"${confirm ? " data-pet-desk-confirm" : ""} data-i18n-ignore aria-label="${escapeHTML(deskCopy("approveNamed", {title}))}" data-pet-desk-title="${name}">${escapeHTML(deskCopy("approve"))}</button><button type="button" class="pet-desk-reject" data-pet-desk-reject="${id}" data-i18n-ignore aria-label="${escapeHTML(deskCopy("rejectNamed", {title}))}" data-pet-desk-title="${name}">${escapeHTML(deskCopy("reject"))}</button>`;
+}
+
+// renderPetDeskRejectForm is the one-line form under a row: a reason (the
+// pet's correction record) and confirm / never mind. The confirm button stays
+// disabled until there is a reason, because the server requires one.
+export function renderPetDeskRejectForm(approvalID: string, title: string, reason = ""): string {
+  const id = escapeHTML(approvalID);
+  const label = deskCopy("rejectReasonNamed", {title});
+  return `<form class="pet-desk-reject-form" data-pet-desk-reject-form="${id}">
+    <input type="text" data-pet-desk-reject-reason="${id}" data-i18n-ignore aria-label="${escapeHTML(label)}" placeholder="${escapeHTML(deskCopy("rejectReason"))}" maxlength="500" value="${escapeHTML(reason)}" autocomplete="off">
+    <button type="submit" class="danger" data-pet-desk-reject-confirm="${id}"${reason.trim() ? "" : " disabled"}>${escapeHTML(deskCopy("rejectConfirm"))}</button>
+    <button type="button" data-pet-desk-reject-cancel="${id}">${escapeHTML(deskCopy("cancel"))}</button>
+  </form>`;
+}
+
 // A needs/later row: the main button opens the approval detail for approvals
 // and ideas, otherwise the Task. Approvals tied to a Task also get an explicit
-// open-task button. There is deliberately no approve/reject on the desk: a
-// delete approval must not be one click away from a one-line summary.
+// open-task button. Approvals and ideas carry inline approve / reject
+// (task-813 round 4); high-risk and delete approvals ask once more.
 function renderDeskNeed(item: PetDeskNeed, position: number | null, options: PetOverviewOptions, now: number): string {
   const translate = options.translate;
   const kind = textValue(item.kind);
@@ -484,12 +537,15 @@ function renderDeskNeed(item: PetDeskNeed, position: number | null, options: Pet
     body = deskDetail(detail, kind === "next_step" ? escapeHTML(translate("petWorkbench.desk.nextStep")) : "");
   }
   const actions: string[] = [];
-  if (isApproval) actions.push(`<button type="button" data-pet-approval-open="${escapeHTML(approvalID)}">${escapeHTML(translate("petWorkbench.desk.review"))}</button>`);
+  const needsChoice = isApproval && Boolean(options.approvalNeedsChoice?.(approvalID));
+  if (isApproval) actions.push(deskDecisionControls(approvalID, textValue(item.title) || approvalID, needsChoice, petDeskApprovalNeedsConfirm(item), translate));
   if (taskID) actions.push(deskOpenTaskButton(taskID, translate));
   const index = position === null ? "" : `<span class="pet-desk-index" aria-hidden="true">${petDeskIndexLabel(position)}</span>`;
-  return `<li class="pet-desk-item kind-${deskKindClass(kind)}">
+  // The status line (busy, error, confirmation) is announced to screen readers.
+  const status = isApproval ? `<p class="pet-desk-decision-status" data-pet-desk-status="${escapeHTML(approvalID)}" role="status" aria-live="polite"></p>` : "";
+  return `<li class="pet-desk-item kind-${deskKindClass(kind)}"${isApproval ? ` data-pet-desk-approval="${escapeHTML(approvalID)}"` : ""}>
     ${index}
-    <div class="pet-desk-item-body">${main}${body}</div>
+    <div class="pet-desk-item-body">${main}${body}${status}</div>
     ${actions.length ? `<div class="pet-desk-item-actions">${actions.join("")}</div>` : ""}
   </li>`;
 }
@@ -655,8 +711,14 @@ export function petDeskReplyPreview(text: string): string {
 // The expand control's copy lives in this chunk, like the records copy, so
 // the shared first-screen catalog does not grow for a desk-only button.
 const PET_DESK_COPY = {
-  "zh-CN": {expand: "展开", collapse: "收起", emptyUnfollowed: "没有未关注的任务。", updatedAt: "更新于 {time}", updateFailed: "刷新失败，稍后会再试；显示的是 {time} 的数据"},
-  "en-US": {expand: "Expand", collapse: "Collapse", emptyUnfollowed: "No unfollowed tasks.", updatedAt: "Updated {time}", updateFailed: "Refresh failed, will retry; showing data from {time}"},
+  "zh-CN": {expand: "展开", collapse: "收起", emptyUnfollowed: "没有未关注的任务。", updatedAt: "更新于 {time}", updateFailed: "刷新失败，稍后会再试；显示的是 {time} 的数据",
+    approve: "批准", reject: "否决", approveNamed: "批准：{title}", rejectNamed: "否决：{title}", reviewNamed: "去处理：{title}",
+    confirmApprove: "确认批准？", confirm: "确认", cancel: "算了", working: "处理中…", approveFailed: "没有处理成功：{message}",
+    rejectReason: "原因（宠物会记下来，写一句）", rejectReasonNamed: "否决“{title}”的原因", rejectConfirm: "确认否决", rejectNeedsReason: "写一句原因再否决"},
+  "en-US": {expand: "Expand", collapse: "Collapse", emptyUnfollowed: "No unfollowed tasks.", updatedAt: "Updated {time}", updateFailed: "Refresh failed, will retry; showing data from {time}",
+    approve: "Approve", reject: "Reject", approveNamed: "Approve: {title}", rejectNamed: "Reject: {title}", reviewNamed: "Review: {title}",
+    confirmApprove: "Approve?", confirm: "Confirm", cancel: "Never mind", working: "Working…", approveFailed: "That did not work: {message}",
+    rejectReason: "Reason (the pet keeps it; one line)", rejectReasonNamed: "Reason for rejecting “{title}”", rejectConfirm: "Confirm reject", rejectNeedsReason: "Write a reason to reject"},
 } satisfies Record<"zh-CN" | "en-US", Record<string, string>>;
 
 type PetDeskCopyKey = keyof typeof PET_DESK_COPY["en-US"];
@@ -1370,4 +1432,197 @@ export function restorePetDeskState(root: HTMLElement, place: PetDeskPlace, rest
     if (node) node.scrollTop = top;
   }
   if (restoreFocus && place.focused) root.querySelector<HTMLElement>(place.focused)?.focus({preventScroll: true});
+}
+
+/* Inline approve / reject controller -------------------------------------- */
+
+export interface PetDeskDecisionOptions {
+  root: HTMLElement;
+  /** Resolve the approval; reason is "" for approve. Rejects with an error. */
+  resolve: (approvalID: string, decision: "approve" | "reject", reason: string) => Promise<void>;
+  /** After a successful decision: refresh the overview (the row leaves). */
+  done: () => void;
+  setTimer?: (callback: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}
+
+export interface PetDeskDecisionState {
+  approvalID: string;
+  reason: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  focused: boolean;
+}
+
+export interface PetDeskDecisions {
+  /** Wire the controls of a freshly painted overview. */
+  bind: () => void;
+  /** The open reject form, if any, so a repaint can put it back. */
+  capture: () => PetDeskDecisionState | null;
+  restore: (state: PetDeskDecisionState) => void;
+}
+
+// createPetDeskDecisions drives the desk's inline approve / reject:
+// - approve: one click; for high-risk and delete approvals the row first asks
+//   "Approve?" with Confirm / Never mind, folding back after
+//   PET_DESK_CONFIRM_MS without a click;
+// - reject: opens a one-line reason form; Enter confirms (once there is a
+//   reason), Escape folds it;
+// - while a decision runs the row's buttons are disabled and the row says
+//   "Working…"; a failure says why in the row and re-enables them.
+export function createPetDeskDecisions(options: PetDeskDecisionOptions): PetDeskDecisions {
+  const setTimer = options.setTimer ?? ((callback: () => void, ms: number) => globalThis.setTimeout(callback, ms));
+  const clearTimer = options.clearTimer ?? ((handle: unknown) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const root = options.root;
+  let confirmTimer: unknown = null;
+  const busy = new Set<string>();
+
+  const row = (id: string) => root.querySelector<HTMLElement>(`[data-pet-desk-approval="${CSS.escape(id)}"]`);
+  const status = (id: string, text: string, failed = false) => {
+    const node = root.querySelector<HTMLElement>(`[data-pet-desk-status="${CSS.escape(id)}"]`);
+    if (!node) return;
+    node.textContent = text;
+    node.classList.toggle("failed", failed);
+  };
+  const setBusy = (id: string, on: boolean) => {
+    const item = row(id);
+    if (!item) return;
+    item.classList.toggle("busy", on);
+    item.setAttribute("aria-busy", String(on));
+    item.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input").forEach(control => {
+      if (on) control.disabled = true;
+      else control.disabled = control.matches("[data-pet-desk-reject-confirm]") && !(item.querySelector<HTMLInputElement>("[data-pet-desk-reject-reason]")?.value.trim());
+    });
+  };
+
+  const run = async (id: string, decision: "approve" | "reject", reason: string) => {
+    if (busy.has(id)) return;
+    busy.add(id);
+    setBusy(id, true);
+    status(id, deskCopy("working"));
+    try {
+      await options.resolve(id, decision, reason);
+      busy.delete(id);
+      options.done();
+    } catch (error) {
+      busy.delete(id);
+      setBusy(id, false);
+      status(id, deskCopy("approveFailed", {message: error instanceof Error ? error.message : String(error)}), true);
+      row(id)?.querySelector<HTMLElement>(decision === "reject" ? "[data-pet-desk-reject-reason]" : "[data-pet-desk-approve]")?.focus();
+    }
+  };
+
+  const foldConfirm = () => {
+    if (confirmTimer !== null) clearTimer(confirmTimer);
+    confirmTimer = null;
+    root.querySelectorAll<HTMLElement>(".pet-desk-confirm").forEach(node => {
+      const id = node.dataset.petDeskConfirmFor || "";
+      node.remove();
+      const item = row(id);
+      item?.querySelectorAll<HTMLElement>("[data-pet-desk-approve], [data-pet-desk-reject]").forEach(button => { button.hidden = false; });
+      if (item && !busy.has(id)) status(id, "");
+    });
+  };
+
+  const askConfirm = (button: HTMLButtonElement, id: string) => {
+    foldConfirm();
+    const actions = button.closest(".pet-desk-item-actions");
+    if (!actions) return;
+    actions.querySelectorAll<HTMLElement>("[data-pet-desk-approve], [data-pet-desk-reject]").forEach(other => { other.hidden = true; });
+    const holder = document.createElement("span");
+    holder.className = "pet-desk-confirm";
+    holder.dataset.petDeskConfirmFor = id;
+    holder.innerHTML = `<button type="button" class="primary" data-pet-desk-confirm-yes>${escapeHTML(deskCopy("confirm"))}</button><button type="button" data-pet-desk-confirm-no>${escapeHTML(deskCopy("cancel"))}</button>`;
+    actions.prepend(holder);
+    status(id, deskCopy("confirmApprove"));
+    holder.querySelector<HTMLButtonElement>("[data-pet-desk-confirm-yes]")?.addEventListener("click", () => {
+      foldConfirm();
+      void run(id, "approve", "");
+    });
+    holder.querySelector<HTMLButtonElement>("[data-pet-desk-confirm-no]")?.addEventListener("click", () => {
+      foldConfirm();
+      row(id)?.querySelector<HTMLElement>("[data-pet-desk-approve]")?.focus();
+    });
+    holder.querySelector<HTMLButtonElement>("[data-pet-desk-confirm-yes]")?.focus();
+    confirmTimer = setTimer(foldConfirm, PET_DESK_CONFIRM_MS);
+  };
+
+  const closeReject = (id: string, focusButton = true) => {
+    const form = root.querySelector<HTMLElement>(`[data-pet-desk-reject-form="${CSS.escape(id)}"]`);
+    form?.remove();
+    if (focusButton) row(id)?.querySelector<HTMLElement>("[data-pet-desk-reject]")?.focus();
+  };
+
+  const openReject = (id: string, title: string, reason = "") => {
+    root.querySelectorAll<HTMLElement>("[data-pet-desk-reject-form]").forEach(form => form.remove());
+    foldConfirm();
+    const body = row(id)?.querySelector<HTMLElement>(".pet-desk-item-body");
+    if (!body) return null;
+    body.insertAdjacentHTML("beforeend", renderPetDeskRejectForm(id, title, reason));
+    const form = body.querySelector<HTMLFormElement>(`[data-pet-desk-reject-form="${CSS.escape(id)}"]`);
+    const input = form?.querySelector<HTMLInputElement>("[data-pet-desk-reject-reason]");
+    const confirm = form?.querySelector<HTMLButtonElement>("[data-pet-desk-reject-confirm]");
+    if (!form || !input || !confirm) return null;
+    input.addEventListener("input", () => {
+      confirm.disabled = !input.value.trim() || busy.has(id);
+      status(id, "");
+    });
+    input.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeReject(id);
+      }
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      const reason = input.value.trim();
+      if (!reason) {
+        status(id, deskCopy("rejectNeedsReason"), true);
+        input.focus();
+        return;
+      }
+      void run(id, "reject", reason);
+    });
+    form.querySelector<HTMLButtonElement>("[data-pet-desk-reject-cancel]")?.addEventListener("click", () => closeReject(id));
+    return input;
+  };
+
+  return {
+    bind() {
+      confirmTimer = null;
+      root.querySelectorAll<HTMLButtonElement>("[data-pet-desk-approve]").forEach(button => button.addEventListener("click", () => {
+        const id = button.dataset.petDeskApprove || "";
+        if (!id || busy.has(id)) return;
+        if (button.hasAttribute("data-pet-desk-confirm")) askConfirm(button, id);
+        else void run(id, "approve", "");
+      }));
+      root.querySelectorAll<HTMLButtonElement>("[data-pet-desk-reject]").forEach(button => button.addEventListener("click", () => {
+        const id = button.dataset.petDeskReject || "";
+        if (!id || busy.has(id)) return;
+        openReject(id, button.dataset.petDeskTitle || "")?.focus();
+      }));
+    },
+    capture() {
+      const form = root.querySelector<HTMLElement>("[data-pet-desk-reject-form]");
+      const input = form?.querySelector<HTMLInputElement>("[data-pet-desk-reject-reason]");
+      if (!form || !input) return null;
+      return {
+        approvalID: form.dataset.petDeskRejectForm || "", reason: input.value,
+        selectionStart: input.selectionStart, selectionEnd: input.selectionEnd,
+        focused: document.activeElement === input,
+      };
+    },
+    restore(state) {
+      const title = row(state.approvalID)?.querySelector<HTMLElement>("[data-pet-desk-reject]")?.dataset.petDeskTitle;
+      // The approval left the list (resolved elsewhere): nothing to restore.
+      if (title === undefined) return;
+      const input = openReject(state.approvalID, title, state.reason);
+      if (!input) return;
+      if (state.focused) {
+        input.focus({preventScroll: true});
+        if (state.selectionStart !== null) input.setSelectionRange(state.selectionStart, state.selectionEnd ?? state.selectionStart);
+      }
+    },
+  };
 }

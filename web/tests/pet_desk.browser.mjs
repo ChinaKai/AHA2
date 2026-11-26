@@ -130,6 +130,16 @@ const watchSet = (watched, ignored, unfollowed) => [
 ];
 const watchSets = {small: watchSet(1, 2, 1), huge: watchSet(200, 300, 50)};
 
+// ?decide=1: approvals of every inline shape on the desk.
+const decideApprovals = [
+  {id: "d-low", task_id: "pet-task", kind: "permission_change", title: "开启渠道管理权限", summary: "低风险", risk: "low", status: "pending", created_at: minutesAgo(50)},
+  {id: "d-high", task_id: "pet-task", kind: "owner_decision", title: "合并高风险分支", summary: "高风险", risk: "high", status: "pending", created_at: minutesAgo(40)},
+  {id: "d-delete", task_id: "pet-task", kind: "delete_workspace", title: "删除旧工作区", summary: "删除", risk: "medium", status: "pending", created_at: minutesAgo(30)},
+  {id: "d-choice", task_id: "pet-task", kind: "owner_decision", title: "选一个方案", summary: "要选", risk: "low", status: "pending", payload: JSON.stringify({options: ["plan_a", "plan_b"]}), created_at: minutesAgo(20)},
+  {id: "d-idea", task_id: "pet-task", kind: "idea", title: "整理想法", summary: "想法", risk: "low", status: "pending", created_at: minutesAgo(10)},
+];
+const decideNeed = item => ({kind: item.kind === "idea" ? "idea" : "approval", approval_id: item.id, approval_kind: item.kind, risk: item.risk, title: item.title, detail: item.summary, since: item.created_at});
+
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const params = new URLSearchParams(location.search);
@@ -162,6 +172,18 @@ window.__releaseInsights = () => { for (const resolve of window.__insightWaiters
 const pageApprovals = ${JSON.stringify(pageApprovals)};
 const allApprovals = ${JSON.stringify(allApprovals)};
 const historyApprovals = ${JSON.stringify(historyApprovals)};
+window.__decide = params.get("decide") === "1";
+window.__decideApprovals = ${JSON.stringify(decideApprovals)};
+window.__resolves = [];
+window.__resolveFailNext = false;
+window.__resolveHold = false;
+window.__resolveWaiters = [];
+const decideNeed = ${decideNeed.toString()};
+const decideDesk = () => {
+  const pending = window.__decideApprovals.filter(item => item.status === "pending");
+  return {...${JSON.stringify(desk)}, needs_owner: pending.filter(item => item.kind !== "idea").map(decideNeed), needs_owner_total: pending.filter(item => item.kind !== "idea").length,
+    later: pending.filter(item => item.kind === "idea").map(decideNeed), later_total: pending.filter(item => item.kind === "idea").length};
+};
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
@@ -175,6 +197,16 @@ window.fetch = async (input, init = {}) => {
     return json({ok: true});
   }
   if (path.startsWith("/api/v1/pet/watches/")) (window.__watchWrites ||= []).push([(init.method || "GET").toUpperCase(), decodeURIComponent(path.split("/").pop())]);
+  if (path.startsWith("/api/v1/pet/approvals/") && path.endsWith("/resolve")) {
+    const id = decodeURIComponent(path.split("/")[5]);
+    const body = JSON.parse(init.body || "{}");
+    window.__resolves.push({id, decision: body.decision, note: body.note || ""});
+    if (window.__resolveHold) await new Promise(resolve => window.__resolveWaiters.push(resolve));
+    if (window.__resolveFailNext) { window.__resolveFailNext = false; return json({ok: false, error: "pet_approval_resolve_failed", message: "执行失败：测试"}, 400); }
+    const item = window.__decideApprovals.find(approval => approval.id === id);
+    if (item) item.status = body.decision === "approve" ? "approved" : "rejected";
+    return json({ok: true, status: item?.status});
+  }
   if (path.startsWith("/api/v1/pet/approvals/") && (init.method || "GET").toUpperCase() === "GET") {
     const id = decodeURIComponent(path.split("/")[5]);
     window.__approvalReads.push(id);
@@ -207,7 +239,8 @@ window.fetch = async (input, init = {}) => {
     window.__workbenchQueries.push(limit);
     if (window.__workbenchFailAfter && window.__workbenchQueries.length > 1) return json({ok: false, error: "workbench_refresh_failed"}, 500);
     const history = params.get("history") === "1";
-    const approvals = history ? historyApprovals.slice(0, limit) : limit >= 200 ? allApprovals : pageApprovals;
+    const approvals = window.__decide ? window.__decideApprovals.slice(0, limit) : history ? historyApprovals.slice(0, limit) : limit >= 200 ? allApprovals : pageApprovals;
+    if (window.__decide) window.__desk = decideDesk();
     return json({
       ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: history ? historyApprovals.length : allApprovals.length,
       approval_counts: history ? Object.values(historyApprovals.reduce((groups, item) => { const key = (item.kind === "idea" ? "idea" : "owner_decision") + item.status; groups[key] = groups[key] || {kind: item.kind, status: item.status, count: 0}; groups[key].count++; return groups; }, {})) : [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
@@ -796,6 +829,91 @@ try {
     assert.equal(m.page, Math.min(1600, width - 64), `${width}x${height}: the board uses the freed width up to the 1600px cap`);
   }
   await boardPage.close();
+
+  // Round 4, item 3: approve and reject on the desk.
+  const decidePage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  decidePage.on("pageerror", error => errors.push(error.message));
+  await decidePage.clock.install();
+  await decidePage.goto(`${url}/?decide=1`, {waitUntil: "domcontentloaded"});
+  await decidePage.clock.runFor(2000);
+  await decidePage.waitForSelector('#pet-desk-needs [data-pet-desk-approval="d-low"]', {timeout: 20000});
+  const deskRow = id => decidePage.locator(`[data-pet-desk-approval="${id}"]`);
+  const resolves = () => decidePage.evaluate(() => window.__resolves);
+  // The choice approval only offers Review; everything else has both buttons.
+  assert.equal(await deskRow("d-choice").locator("[data-pet-desk-approve], [data-pet-desk-reject]").count(), 0);
+  assert.equal(await deskRow("d-choice").locator('button[data-pet-approval-open="d-choice"]', {hasText: "Review"}).count(), 1);
+  for (const id of ["d-low", "d-high", "d-delete"]) assert.equal(await deskRow(id).locator("[data-pet-desk-approve]").count(), 1, id);
+  // The title still opens the detail.
+  await deskRow("d-low").locator(".pet-desk-item-main").click();
+  await decidePage.waitForSelector("dialog.pet-approval-detail-dialog[open]");
+  await decidePage.click("dialog.pet-approval-detail-dialog [data-pet-approval-detail-close]");
+  // Approve failure: the row says why and the buttons come back.
+  await decidePage.evaluate(() => { window.__resolveFailNext = true; });
+  await deskRow("d-low").locator("[data-pet-desk-approve]").click();
+  await decidePage.waitForFunction(() => document.querySelector('[data-pet-desk-status="d-low"]')?.classList.contains("failed"));
+  assert.match(await deskRow("d-low").locator("[data-pet-desk-status]").innerText(), /^That did not work: 执行失败：测试$/);
+  assert.equal(await deskRow("d-low").locator("[data-pet-desk-approve]").isEnabled(), true, "buttons come back after a failure");
+  // Approve while busy: buttons disabled, "Working…", then the row leaves.
+  await decidePage.evaluate(() => { window.__resolveHold = true; });
+  await deskRow("d-low").locator("[data-pet-desk-approve]").click();
+  await decidePage.waitForFunction(() => document.querySelector('[data-pet-desk-approval="d-low"]')?.getAttribute("aria-busy") === "true");
+  assert.equal(await deskRow("d-low").locator("[data-pet-desk-approve]").isDisabled(), true);
+  assert.equal(await deskRow("d-low").locator("[data-pet-desk-status]").innerText(), "Working…");
+  await deskRow("d-low").locator("[data-pet-desk-approve]").click({force: true});
+  await decidePage.evaluate(() => { window.__resolveHold = false; for (const resolve of window.__resolveWaiters.splice(0)) resolve(); });
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-low"]'), null, {timeout: 10000});
+  assert.deepEqual((await resolves()).map(item => `${item.id}:${item.decision}`), ["d-low:approve", "d-low:approve"], "one failed and one successful approve, no double submit");
+  // High risk: the first click asks, the confirmation folds back by itself.
+  await deskRow("d-high").locator("[data-pet-desk-approve]").click();
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-confirm-yes]").isVisible(), true);
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-status]").innerText(), "Approve?");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-confirm-yes")), true, "focus moves to Confirm");
+  await decidePage.clock.runFor(5100);
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-confirm-yes]").count(), 0, "the confirmation folds back after five seconds");
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-approve]").isVisible(), true);
+  assert.equal((await resolves()).filter(item => item.id === "d-high").length, 0, "no decision without the second click");
+  // "Never mind", then a real confirmation with the keyboard.
+  await deskRow("d-delete").locator("[data-pet-desk-approve]").click();
+  await deskRow("d-delete").locator("[data-pet-desk-confirm-no]").click();
+  assert.equal((await resolves()).filter(item => item.id === "d-delete").length, 0);
+  await deskRow("d-delete").locator("[data-pet-desk-approve]").focus();
+  await decidePage.keyboard.press("Enter");
+  await decidePage.keyboard.press("Enter");
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-delete"]'), null, {timeout: 10000});
+  assert.deepEqual((await resolves()).filter(item => item.id === "d-delete").map(item => item.decision), ["approve"]);
+  // Reject: the reason form, Escape folds it, Enter confirms it.
+  await deskRow("d-high").locator("[data-pet-desk-reject]").click();
+  const reason = deskRow("d-high").locator("[data-pet-desk-reject-reason]");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-reject-reason")), true, "focus moves to the reason");
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-reject-confirm]").isDisabled(), true, "no reject without a reason");
+  await decidePage.keyboard.press("Enter");
+  assert.equal((await resolves()).filter(item => item.id === "d-high").length, 0, "Enter without a reason does not reject");
+  await decidePage.keyboard.press("Escape");
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-reject-form]").count(), 0, "Escape folds the form");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-reject")), true, "focus returns to Reject");
+  await decidePage.keyboard.press("Enter");
+  await reason.fill("先等评审");
+  // A background refresh while typing keeps the form, the text and the focus.
+  const readsBefore = await decidePage.evaluate(() => window.__workbenchQueries.length);
+  await decidePage.evaluate(() => window.__emit("task_status_changed"));
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(base => window.__workbenchQueries.length > base, readsBefore);
+  assert.equal(await deskRow("d-high").locator("[data-pet-desk-reject-reason]").inputValue(), "先等评审", "the reason survives a refresh");
+  assert.equal(await decidePage.evaluate(() => document.activeElement?.hasAttribute("data-pet-desk-reject-reason")), true, "and keeps the focus");
+  await decidePage.keyboard.type("，下周再说");
+  await decidePage.keyboard.press("Enter");
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-high"]'), null, {timeout: 10000});
+  assert.deepEqual((await resolves()).filter(item => item.id === "d-high"), [{id: "d-high", decision: "reject", note: "先等评审，下周再说"}]);
+  // An idea is approved with one click from the later list.
+  await decidePage.locator("#pet-desk-later summary").click();
+  await deskRow("d-idea").locator("[data-pet-desk-approve]").click();
+  await decidePage.clock.runFor(4000);
+  await decidePage.waitForFunction(() => !document.querySelector('[data-pet-desk-approval="d-idea"]'), null, {timeout: 10000});
+  assert.deepEqual(await untranslated(decidePage), [], "English inline controls");
+  await decidePage.close();
 
   // Step three, items 9-11: the records tab.
   await openOverview(page);
