@@ -1,6 +1,6 @@
 # 宠物工作台改造设计：把概览改成“宠物工位”
 
-- 状态：owner 已确认（2026-11-26）。数据和宠物工具已在任务分支实现并测试；第一步的页面在同一分支实现，全部完成后由 owner 决定合并。
+- 状态：owner 已确认（2026-11-26）。第一步已在任务分支完成：数据和宠物工具（`00fc73d`）、概览页面（`32dcb4d`）。等 owner 决定合并；第二步、第三步未做。
 - 来源：task-813。
 - 基线：main `34c4afd`。任务分支：`aha/task_e40adf343e3e375b5f7c`。
 - 写于 2026-11-26。
@@ -261,7 +261,16 @@ desk
   - `go test ./internal/app/ -run 'Pet|Workbench|OwnerAssistant'`：通过。跳过了 `TestPetDomainRuntimeUsesCurrentBindingsPermissionsAndMode` 和 `TestOwnerAssistantRollsFailedPetStartBackToDraft`，这两个在 main 上本来就失败，和本次改动无关。
   - `go test ./internal/httpapi/ -run 'Pet|Workbench'`：通过。跳过了宠物覆盖台账的三个用例，同样是 main 上已有的失败。
   - `go vet` 三个包无告警。
-- 没做的验证：没有在正式数据库上量接口耗时；页面还没改，所以没有浏览器用例。
+- 没做的验证：没有在正式数据库上量接口耗时。
+
+页面（提交 `32dcb4d`，Opus 实现，Main 评审，2026-11-26）：
+
+- `npm run build --prefix web` 通过；`npm test --prefix web` 658 个用例通过（改动前 642 个）。
+- 浏览器用例通过：新增的 `pet_desk.browser.mjs`，以及原有的 `pet_i18n.browser.mjs`、`pet_approval_refresh.browser.mjs`。
+- 评审另做的核对：把注入字符串、不认识的类型、错误的数据类型喂给渲染函数，没有未转义的输出，也没有 `undefined`；对源码做了 7 处变异（去掉转义、打乱顺序、忽略总数、去掉旧概览退路、不隐藏零值时间、默认展开“不急的”、审批改成打开任务），新增用例全部能发现；前端类型和后端返回的字段逐一对上。
+- 与当时的 main（`5feabcd`）试合并没有冲突，合并后上面的前端用例和宠物相关的 Go 用例都通过。
+- 首屏体积上限从 283,392 调到 288,000 字节：改动前只剩 14 字节余量，工位的代码、文案和样式加了约 4.4 KB，实测 287,777。
+- 已知的小毛病，没有修：整点时长显示成“1 小时 0 分钟”；点开一条不在已加载那页里的老审批时，页面会多读一次审批列表（上限 200 条），读不到就跳到审批页签。
 
 ## 十、第一步页面的验收标准
 
