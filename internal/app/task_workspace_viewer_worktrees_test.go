@@ -1,16 +1,79 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+type viewerWorktreeProbeFixture struct {
+	viewerFS
+	listDelay, pathsDelay time.Duration
+	listExit              int
+	pathsErr              error
+}
+
+const viewerProbeCheckout = "/checkout"
+
+func (source viewerWorktreeProbeFixture) git(ctx context.Context, _ int, _ bool, _ ...string) (viewerGitOutput, error) {
+	select {
+	case <-ctx.Done():
+		return viewerGitOutput{}, ctx.Err()
+	case <-time.After(source.listDelay):
+		return viewerGitOutput{exit: source.listExit, data: []byte("worktree " + viewerProbeCheckout + "\x00\x00")}, nil
+	}
+}
+
+func (source viewerWorktreeProbeFixture) checkWorktreePaths(ctx context.Context, _ string, _ []string) (viewerWorktreePaths, error) {
+	select {
+	case <-ctx.Done():
+		return viewerWorktreePaths{}, ctx.Err()
+	case <-time.After(source.pathsDelay):
+		return viewerWorktreePaths{Current: viewerProbeCheckout, Status: []string{""}}, source.pathsErr
+	}
+}
+
+func TestWorkspaceViewerWorktreeProbes(t *testing.T) {
+	transport := fmt.Errorf("worker connection failed: %w", ErrViewerTransport)
+	for _, tc := range []struct {
+		name   string
+		source viewerWorktreeProbeFixture
+		want   error
+	}{
+		{"git list fails", viewerWorktreeProbeFixture{listExit: 128}, ErrViewerGit},
+		{"git list times out", viewerWorktreeProbeFixture{listDelay: 6 * time.Second}, ErrViewerGit},
+		{"path validation fails", viewerWorktreeProbeFixture{pathsErr: ErrViewerGit}, ErrViewerGit},
+		{"path validation transport fails", viewerWorktreeProbeFixture{pathsErr: transport}, transport},
+		{"path validation times out", viewerWorktreeProbeFixture{pathsDelay: 6 * time.Second}, ErrViewerGit},
+		{"stages have independent budgets", viewerWorktreeProbeFixture{listDelay: 4 * time.Second, pathsDelay: 4 * time.Second}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				req := WorkspaceViewerRequest{Worktree: viewerWorktreeID(viewerProbeCheckout)}
+				items, _, _, err := selectViewerWorktree(t.Context(), tc.source, req)
+				if err != tc.want || (tc.want == nil && len(items) != 1) {
+					t.Fatalf("explicit worktree: got %d worktrees and %v, want %v", len(items), err, tc.want)
+				}
+				if tc.want != nil {
+					items, _, _, err = selectViewerWorktree(t.Context(), tc.source, WorkspaceViewerRequest{})
+					if err != nil || len(items) != 0 {
+						t.Fatalf("default view: got %d worktrees and %v", len(items), err)
+					}
+				}
+			})
+		})
+	}
+}
 
 func TestWorkspaceViewerWorktrees(t *testing.T) {
 	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {

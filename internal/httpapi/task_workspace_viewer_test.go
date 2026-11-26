@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +46,7 @@ func TestTaskWorkspaceViewerHTTP(t *testing.T) {
 		{"GET", "file?path=%2e%2e%2fexample.txt", fixture.client, 400, "workspace_viewer_invalid_path"},
 		{"GET", "state?root=" + url.QueryEscape(worktree), fixture.client, 400, "workspace_viewer_invalid_path"},
 		{"GET", "state?worktree=" + url.QueryEscape(worktree), fixture.client, 400, "workspace_viewer_invalid_worktree"},
-		{"GET", "state?worktree=" + strings.Repeat("f", 64), fixture.client, 400, "workspace_viewer_invalid_worktree"},
+		{"GET", "state?worktree=" + strings.Repeat("f", 64), fixture.client, 503, "workspace_viewer_git_failed"},
 		{"GET", "state?worktree=", fixture.client, 400, "workspace_viewer_invalid_worktree"},
 		{"GET", "tree?worktree=one&worktree=two", fixture.client, 400, "workspace_viewer_invalid_worktree"},
 		{"GET", "state?repo=" + url.QueryEscape(worktree), fixture.client, 400, "workspace_viewer_invalid_repository"},
@@ -85,6 +88,63 @@ func TestTaskWorkspaceViewerHTTP(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing worktree: HTTP %d", response.StatusCode)
+	}
+}
+
+func TestTaskWorkspaceViewerWorktreeProbeHTTP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Git probe fixture uses a POSIX script")
+	}
+	fixture := newTaskDetailFixture(t, false)
+	item, err := fixture.database.Workspace(t.Context(), fixture.task.WorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(item.RootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(root, "missing")
+	gitBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(gitBin, "git"), []byte(`#!/bin/sh
+case " $* " in
+  *" worktree list --porcelain -z "*)
+    [ "$AHA_TEST_VIEWER_FAILURE" = "list" ] && exit 1
+    printf 'worktree %s\000\000' "$AHA_TEST_VIEWER_WORKTREE"
+    ;;
+  *" rev-parse --path-format=absolute --git-common-dir "*)
+    [ "$AHA_TEST_VIEWER_FAILURE" = "paths" ] && exit 1
+    printf '%s\n' "$AHA_TEST_VIEWER_COMMON_DIR"
+    ;;
+  *) exit 2 ;;
+esac
+`), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", gitBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AHA_TEST_VIEWER_WORKTREE", missing)
+	t.Setenv("AHA_TEST_VIEWER_COMMON_DIR", filepath.Join(root, ".git"))
+	known := fmt.Sprintf("%x", sha256.Sum256([]byte(missing)))
+	base := fixture.server.URL + "/api/v1/tasks/" + fixture.task.ID + "/workspace/file?path=readme.txt&worktree="
+	for _, tc := range []struct {
+		name, failure, id string
+		status            int
+		code              string
+	}{
+		{"failed enumeration", "list", known, 503, "workspace_viewer_git_failed"},
+		{"failed validation", "paths", known, 503, "workspace_viewer_git_failed"},
+		{"unknown ID", "", strings.Repeat("f", 64), 400, "workspace_viewer_invalid_worktree"},
+		{"missing checkout", "", known, 404, "workspace_viewer_worktree_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AHA_TEST_VIEWER_FAILURE", tc.failure)
+			response := requestJSON(t, fixture.client, http.MethodGet, base+tc.id, nil, "")
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil || response.StatusCode != tc.status || !strings.Contains(string(body), tc.code) {
+				t.Fatalf("HTTP %d %s (%v), want %d %s", response.StatusCode, body, err, tc.status, tc.code)
+			}
+		})
 	}
 }
 

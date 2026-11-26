@@ -14,7 +14,10 @@ import (
 	"unicode/utf8"
 )
 
-const viewerWorktreeListLimit = 256 << 10
+const (
+	viewerWorktreeListLimit    = 256 << 10
+	viewerWorktreeProbeTimeout = 5 * time.Second
+)
 
 type viewerWorktree struct {
 	ID          string `json:"id"`
@@ -69,13 +72,14 @@ func parseViewerWorktrees(data []byte) []viewerWorktree {
 }
 
 func selectViewerWorktree(ctx context.Context, source viewerFS, req WorkspaceViewerRequest) ([]viewerWorktree, viewerFS, func(), error) {
-	probe, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
 	git := viewerGit{source: source}
-	out, err := git.checked(probe, viewerWorktreeListLimit, "worktree", "list", "--porcelain", "-z")
-	if err != nil || out.truncated {
+	listCtx, cancelList := context.WithTimeout(ctx, viewerWorktreeProbeTimeout)
+	out, err := git.checked(listCtx, viewerWorktreeListLimit, "worktree", "list", "--porcelain", "-z")
+	listFailed := err != nil || out.truncated || listCtx.Err() != nil
+	cancelList()
+	if listFailed {
 		if req.Worktree != "" {
-			return nil, nil, nil, ErrViewerWorktree
+			return nil, nil, nil, ErrViewerGit
 		}
 		return nil, nil, nil, nil
 	}
@@ -84,10 +88,15 @@ func selectViewerWorktree(ctx context.Context, source viewerFS, req WorkspaceVie
 	for i, item := range items {
 		dirs[i] = item.dir
 	}
-	check, err := source.checkWorktreePaths(probe, req.workspaceRoot, dirs)
-	if err != nil || len(check.Status) != len(items) {
+	pathsCtx, cancelPaths := context.WithTimeout(ctx, viewerWorktreeProbeTimeout)
+	defer cancelPaths()
+	check, err := source.checkWorktreePaths(pathsCtx, req.workspaceRoot, dirs)
+	if err != nil || pathsCtx.Err() != nil || len(check.Status) != len(items) {
 		if req.Worktree != "" {
-			return nil, nil, nil, ErrViewerWorktreeMissing
+			if errors.Is(err, ErrViewerGit) || errors.Is(err, ErrViewerTransport) {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrViewerGit
 		}
 		return nil, nil, nil, nil
 	}
