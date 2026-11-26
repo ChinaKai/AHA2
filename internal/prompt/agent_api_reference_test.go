@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,5 +60,24 @@ func TestAgentAPIReferenceTellsTheAgentToUseTheVariable(t *testing.T) {
 	}
 	if !strings.Contains(reference, "stale") {
 		t.Fatal("reference does not warn that an earlier address may be stale")
+	}
+}
+
+func TestAgentAPIMemoryLinesAreDocumented(t *testing.T) {
+	t.Parallel()
+	docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "agent-api.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := templateFiles.ReadFile("templates/resource-agent-api.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"repo docs": string(docs), "Turn reference": string(reference)} {
+		for _, expected := range []string{"PATCH /api/v1/agent/turn/memory", `"lines":[`, `^[a-z0-9][a-z0-9_-]{0,31}$`, "200"} {
+			if !strings.Contains(body, expected) {
+				t.Fatalf("%s does not document %q", name, expected)
+			}
+		}
 	}
 }

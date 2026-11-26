@@ -706,16 +706,50 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 	if call := coreMCPCallTool(t, url, token, "memory_update", map[string]any{
 		"add_constraints": []string{"mcp-constraint"}, "status": "do-not-log-this-value",
 		"current_goal": "mcp goal", "goal_reason": "the tool can change the goal",
+		"lines": []map[string]string{{"id": "sql-device", "title": "Device tests", "owner": "self", "state": "open"}},
 	}); call.Status != http.StatusOK || call.IsError {
 		t.Fatalf("mcp memory status=%d payload=%#v", call.Status, call)
 	}
-	response := agentRequest(t, h.server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{
+	memoryURL := h.server.URL + "/api/v1/agent/turn/memory"
+	response := agentRequest(t, memoryURL, http.MethodPatch, token, map[string]any{
+		"lines": []map[string]string{{"id": "sql-device", "state": "wrong"}},
+	})
+	if body := readBody(t, response); response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "state must be") {
+		t.Fatalf("HTTP did not explain rejected state: status=%d body=%s", response.StatusCode, body)
+	}
+	response = agentRequest(t, memoryURL, http.MethodPatch, token, map[string]any{
 		"next_steps": []string{"http-step"},
+		"lines":      []map[string]string{{"id": "sql-device", "step": "Installed"}},
 	})
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("http memory status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
-	response.Body.Close()
+	var updated struct {
+		Memory domain.TaskMemory `json:"memory"`
+	}
+	decodeResponse(t, response, &updated)
+	if len(updated.Memory.Lines) != 1 || updated.Memory.Lines[0].Title != "Device tests" || updated.Memory.Lines[0].Step != "Installed" {
+		t.Fatalf("HTTP update returned the wrong lines: %+v", updated.Memory.Lines)
+	}
+	response = agentRequest(t, h.server.URL+"/api/v1/agent/tasks/"+task.ID, http.MethodGet, token, nil)
+	readback := struct {
+		Memory domain.TaskMemory `json:"memory"`
+	}{}
+	decodeResponse(t, response, &readback)
+	if response.StatusCode != http.StatusOK || len(readback.Memory.Lines) != 1 || readback.Memory.Lines[0].Step != "Installed" {
+		t.Fatalf("Agent HTTP read did not return the line: %+v, status=%d", readback, response.StatusCode)
+	}
+	readTool := coreMCPCallTool(t, url, token, "task_get", map[string]any{})
+	var toolView app.AgentCoreTaskView
+	if readTool.Status != http.StatusOK || readTool.IsError || json.Unmarshal([]byte(readTool.Text), &toolView) != nil ||
+		toolView.StateCard == nil || len(toolView.StateCard.Lines) != 1 || toolView.StateCard.Lines[0].Step != "Installed" {
+		t.Fatalf("Agent MCP read did not return the line: %+v", readTool)
+	}
+	history, err := h.database.TaskLineEvents(h.ctx, task.ID)
+	if err != nil || len(history) != 2 || history[0].Kind != "opened" || history[1].Kind != "updated" ||
+		history[0].TurnID != turn.ID || history[1].RoundID != turn.RoundID {
+		t.Fatalf("unexpected MCP and HTTP line history: %+v, %v", history, err)
+	}
 	memory, err := h.database.TaskMemory(h.ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -756,7 +790,7 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 	// The audit row records the tool and keys only. The memory value itself must
 	// never appear in audit data.
 	auditJSON := waitForCoreAudit(t, h.dbPath, "memory_update")
-	if strings.Contains(auditJSON, "do-not-log-this-value") || strings.Contains(auditJSON, token) {
+	if strings.Contains(auditJSON, "do-not-log-this-value") || strings.Contains(auditJSON, token) || strings.Contains(auditJSON, "sql-device") {
 		t.Fatalf("audit leaked a value or token: %s", auditJSON)
 	}
 	var audit map[string]any
@@ -770,9 +804,14 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 		t.Fatalf("audit missing duration: %#v", audit)
 	}
 	keys, _ := audit["argument_keys"].([]any)
-	if len(keys) != 4 || keys[0] != "add_constraints" || keys[1] != "current_goal" ||
-		keys[2] != "goal_reason" || keys[3] != "status" {
+	if len(keys) != 5 || keys[0] != "add_constraints" || keys[1] != "current_goal" ||
+		keys[2] != "goal_reason" || keys[3] != "lines" || keys[4] != "status" {
 		t.Fatalf("audit keys=%#v", audit)
+	}
+	if call := coreMCPCallTool(t, url, token, "memory_update", map[string]any{
+		"lines": []map[string]string{{"id": "sql-device", "owner": "other"}},
+	}); call.Status != http.StatusOK || !call.IsError || !strings.Contains(call.Text, "needs who") {
+		t.Fatalf("MCP did not explain rejected owner change: %+v", call)
 	}
 }
 

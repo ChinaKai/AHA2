@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -56,5 +57,51 @@ func TestTaskCompletionAndReopenAreRecordedOnTheGoalTimeline(t *testing.T) {
 	}
 	if memory.CurrentGoal != "fix the login timeout" {
 		t.Fatalf("a lifecycle event rewrote the goal: %q", memory.CurrentGoal)
+	}
+}
+
+func TestTaskMemoryCarriesPersistedLinesIntoNextTurnPrompt(t *testing.T) {
+	fixture := newPetDeskFixture(t)
+	task, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+		ProjectID: fixture.project.ID, WorkspaceID: fixture.workspace.ID, Title: "Parallel work",
+		Request: "Verify release", ModelID: fixture.model.ID, Isolation: "inplace", Filesystem: "workspace-write",
+		Approval: "never", CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.StartTask(fixture.ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := fixture.service.SubmitAgentMessage(fixture.ctx, task.ID, "main", "Start verification")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurn(t, fixture.database, first.ID, domain.TurnSucceeded)
+
+	title, owner, state, step := "Verify on a device", "self", "open", "Build sent to the device"
+	patches := []domain.TaskLinePatch{{ID: "device", Title: &title, Owner: &owner, State: &state, Step: &step}}
+	if err := fixture.database.UpdateTaskMemory(fixture.ctx, task.ID, first, fixture.now, patches,
+		func(memory *domain.TaskMemory) (*domain.TaskGoalChange, error) {
+			return applyMemoryUpdate(memory, first, fixture.now, MemoryUpdate{Lines: patches})
+		}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := fixture.service.SubmitAgentMessage(fixture.ctx, task.ID, "main", "Continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurn(t, fixture.database, next.ID, domain.TurnSucceeded)
+	prompts, _ := fixture.service.executor.(*stubExecutor).requestHistory()
+	if len(prompts) < 2 {
+		t.Fatalf("received %d executor prompts for two Turns", len(prompts))
+	}
+	patch := "device: Verify on a device (owner: self, state: open) | step: Build sent to the device"
+	last := prompts[len(prompts)-1]
+	if strings.Contains(prompts[0], patch) || !strings.Contains(last, patch) {
+		t.Fatalf("expected the persisted line in the second prompt: %q", last)
+	}
+	if strings.Contains(last, "ended without updating this card") {
+		t.Fatal("a state card with only a line update was flagged as stale")
 	}
 }

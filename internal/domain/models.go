@@ -667,8 +667,8 @@ type BackendSession struct {
 // page and the next Turn reads it in its prompt, so one text serves both.
 //
 // Status, NextSteps and OpenQuestions describe "now" and are replaced as a
-// whole each time the Agent updates them; an append-only log would go stale.
-// Constraints are the Owner's standing decisions and are appended, because they
+// whole each time the Agent updates them. Lines also describe "now" and are
+// updated individually by ID. Constraints are the Owner's standing decisions and are appended, because they
 // are exactly what a compacted session forgets.
 type TaskMemory struct {
 	TaskID      string `json:"task_id"`
@@ -682,6 +682,7 @@ type TaskMemory struct {
 	NextSteps       []string         `json:"next_steps,omitempty"`
 	Constraints     []TaskMemoryNote `json:"constraints,omitempty"`
 	OpenQuestions   []string         `json:"open_questions,omitempty"`
+	Lines           []TaskLine       `json:"lines,omitempty"`
 	GoalHistory     []TaskGoalChange `json:"goal_history,omitempty"`
 	Extra           map[string]any   `json:"extra,omitempty"`
 	UpdatedAt       time.Time        `json:"updated_at"`

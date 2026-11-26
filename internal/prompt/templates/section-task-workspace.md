@@ -18,4 +18,6 @@ Warning: the previous Turn ended without updating this card, so it may be out of
 - standing constraints (keep them unless the Owner says otherwise):{{range .MemoryConstraints}}
   - {{.}}{{end}}{{end}}{{if .MemoryOpenQuestions}}
 - waiting on the Owner:{{range .MemoryOpenQuestions}}
-  - {{.}}{{end}}{{end}}{{end}}
+  - {{.}}{{end}}{{end}}{{if .MemoryLines}}
+- active lines:{{range .MemoryLines}}
+  - {{.ID}}: {{.Title}} (owner: {{.Owner}}{{if .Who}} / {{.Who}}{{end}}, state: {{.State}}){{if .Step}} | step: {{.Step}}{{end}}{{if .Blocker}} | blocker: {{.Blocker}}{{end}}{{end}}{{end}}{{end}}

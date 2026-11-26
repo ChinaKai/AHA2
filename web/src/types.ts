@@ -823,8 +823,22 @@ export interface TaskMemory {
   next_steps?: string[];
   constraints?: TaskMemoryNote[];
   open_questions?: string[];
+  lines?: TaskLine[];
   goal_history?: TaskGoalChange[];
   updated_at?: string;
+}
+
+export interface TaskLine {
+  id: string;
+  title: string;
+  owner: "self" | "owner" | "other";
+  who?: string;
+  state: "open" | "waiting" | "blocked" | "closed";
+  step?: string;
+  blocker?: string;
+  opened_at: string;
+  updated_at: string;
+  closed_at?: string;
 }
 
 export interface TaskMemoryNote {

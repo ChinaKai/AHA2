@@ -386,11 +386,14 @@ func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims,
 	if err != nil {
 		return domain.TaskMemory{}, err
 	}
-	memory, err := s.store.TaskMemory(ctx, call.Task.ID)
-	if err != nil {
-		return domain.TaskMemory{}, err
+	if update.Empty() {
+		return domain.TaskMemory{}, fmt.Errorf("memory update is empty")
 	}
-	if err := s.applyMemoryUpdate(ctx, call.Task, call.Turn, memory, update); err != nil {
+	now := s.now().UTC()
+	if err := s.store.UpdateTaskMemory(ctx, call.Task.ID, call.Turn, now, update.Lines,
+		func(memory *domain.TaskMemory) (*domain.TaskGoalChange, error) {
+			return applyMemoryUpdate(memory, call.Turn, now, update)
+		}); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	return s.store.TaskMemory(ctx, call.Task.ID)

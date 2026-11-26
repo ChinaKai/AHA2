@@ -68,7 +68,7 @@ GET /api/v1/agent/project/runtimes	httpapi	internal/httpapi/server.go	agentProje
 GET /api/v1/agent/project/workspaces	httpapi	internal/httpapi/server.go	agentProjectWorkspaces	agent_turn	v2:c5d261ef465a	pending	pending	pending	pending	pending
 GET /api/v1/agent/skills	httpapi	internal/httpapi/server.go	agentSkills	agent_turn	v2:05d4cfa16434	pending	pending	pending	pending	pending
 GET /api/v1/agent/skills/{skill}	httpapi	internal/httpapi/server.go	agentSkill	agent_turn	v2:2b0a76972c08	pending	pending	pending	pending	pending
-GET /api/v1/agent/tasks/{task}	httpapi	internal/httpapi/server.go	agentTaskStatus	agent_turn	v2:2e4e1e0dbacf	pending	pending	pending	pending	pending
+GET /api/v1/agent/tasks/{task}	httpapi	internal/httpapi/server.go	agentTaskStatus	agent_turn	v2:ce22bcdaf370	pending	pending	pending	pending	pending
 GET /api/v1/assistant	httpapi	internal/httpapi/server.go	ownerAssistant	owner_session	v2:b2fb2d95e98b	pending	pending	pending	pending	pending
 GET /api/v1/assistant/hints	httpapi	internal/httpapi/server.go	ownerAssistantHints	owner_session	v2:ec7c76aa2ec9	pending	pending	pending	pending	pending
 GET /api/v1/auth/status	httpapi	internal/httpapi/server.go	authStatus	transport_auth	v2:d34e4b7b5fa0	pending	pending	pending	pending	pending

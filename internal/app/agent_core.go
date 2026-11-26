@@ -54,6 +54,7 @@ type AgentCoreTaskView struct {
 	UpdatedAt   time.Time           `json:"updated_at"`
 	CompletedAt time.Time           `json:"completed_at,omitempty"`
 	Turns       []AgentCoreTurnView `json:"turns,omitempty"`
+	StateCard   *PetTaskStateCard   `json:"state_card,omitempty"`
 }
 
 // AgentWriteAllowed reports whether this Turn may use the core write tools.
@@ -150,7 +151,12 @@ func (s *Service) AgentCoreTaskGet(ctx context.Context, claims agentapi.Claims, 
 	if err != nil {
 		return AgentCoreTaskView{}, err
 	}
+	cards, err := s.store.TaskStateCards(ctx, []string{item.ID})
+	if err != nil {
+		return AgentCoreTaskView{}, err
+	}
 	view := agentCoreTaskView(item)
+	view.StateCard = petTaskStateCard(cards[item.ID])
 	view.Turns = make([]AgentCoreTurnView, 0, len(turns))
 	for _, turn := range turns {
 		view.Turns = append(view.Turns, agentCoreTurnView(turn))

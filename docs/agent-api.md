@@ -57,9 +57,21 @@ POST  /api/v1/agent/tasks
 GET   /api/v1/agent/tasks/{task}
 ```
 
-Task Memory API 继续支持 `{"append":{...}}` 与 `{"replace":{...}}`，两种模式都可携带 `current_goal`。目标真实变化时必须同时提交 `goal_change_type`（`set`、`revise`、`pause`、`resume`、`complete` 或 `reopen`）与 `goal_reason`；服务端会把变更记为独立目标事件并更新 Task 的权威目标。普通补充、执行进度和结果反馈不应重复更新目标。
+PATCH 请求直接提交要更新的字段。`status`、`next_steps` 和 `open_questions` 按字段整体替换；`add_constraints` 追加约束，`remove_constraints` 按原文移除。目标真实变化时提交 `current_goal` 和 `goal_reason`。`goal_change_type` 可填 `set`、`revise`、`pause`、`resume`、`complete` 或 `reopen`，默认 `revise`。服务端会把变更记为目标事件并更新 Task 的权威目标。普通进度沿用原目标。
 
-Task Memory 的旧 decisions/facts/progress/verification/next_actions 数组只为兼容和迁移保留，不再进入默认 Prompt 或 Web/Agent API 响应。Task Memory 页面和 Agent 状态使用当前目标及最近 20 次目标变更。普通 Turn 不应为了恢复语义而主动读取或维护旧数组；使用 replace 时必须由调用方保证携带所有仍有效内容。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
+`lines` 记录并行分线。下面的请求新增 `device-test`，并关闭已有的 `docs`：
+
+```json
+{"lines":[{"id":"device-test","title":"在设备上验证","owner":"other","who":"实验室同事","state":"waiting","step":"安装包已发","blocker":"等设备空闲"},{"id":"docs","state":"closed"}]}
+```
+
+- `id` 在任务内唯一，匹配 `^[a-z0-9][a-z0-9_-]{0,31}$`。新分线还需 `title`、`owner` 和 `state`，初始状态可用 `open`、`waiting` 或 `blocked`。
+- `owner` 可填 `self`（任务自己）、`owner` 或 `other`。`other` 要用 `who` 写清负责的人或团队。服务端会清空其他负责方的 `who`。
+- 按 `id` 合并，没提交的线和字段保留原值。`step`、`blocker` 可用空字符串清空。显式写 `state: closed` 关闭，写 `state: open` 可用原 ID 重开。
+- 未闭环最多 8 条。`title`、`who`、`step`、`blocker` 每项最多 200 个字符。服务端填写 `opened_at`、`updated_at`、`closed_at`，状态卡保留最近闭环的 8 条，事件历史保留所有开线、更新、闭环和重开记录。重复提交相同内容只记一次。
+- PATCH 返回 `memory`，有分线时可在 `memory.lines` 读取。GET `/api/v1/agent/tasks/{task}` 也返回状态卡。
+
+Task Memory 的旧 decisions/facts/progress/verification/next_actions 数组只为兼容和迁移保留。Task Memory 页面和 Agent 状态显示当前目标及最近 20 次目标变更。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 

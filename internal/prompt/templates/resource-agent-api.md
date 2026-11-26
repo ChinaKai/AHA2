@@ -65,6 +65,14 @@ The memory endpoint (and the `memory_update` tool) writes the Task state card: t
 
 `status` (up to 600 characters), `next_steps` and `open_questions` (up to 6 entries each) replace what was there, so send the current picture rather than a log, and send `[]` to clear a list. Constraints are the Owner's standing decisions: they are appended, at most 12 are kept, and one is removed by its exact text. Update the card before the final answer of every Turn; a Turn that ends without updating it leaves a card the next Turn is told may be stale.
 
+For parallel work, send `lines`. This example opens one line and explicitly closes an existing one:
+
+```json
+{"lines":[{"id":"device-test","title":"Validate on the device","owner":"other","who":"Lab team","state":"waiting","step":"Sent the build","blocker":"Waiting for the device slot"},{"id":"docs","state":"closed"}]}
+```
+
+IDs match `^[a-z0-9][a-z0-9_-]{0,31}$` and stay unique within the Task. A new line needs `id`, `title`, `owner` and `state`. Owners are `self`, `owner`, or `other` (which requires `who`). States are `open`, `waiting`, `blocked`, and `closed`. Omitted lines and fields keep their values. Set `state` to `open` to reopen a closed line by its original ID. There can be up to 8 lines that are not closed, and each of `title`, `who`, `step`, and `blocker` holds up to 200 characters. Send an empty string to clear `step` or `blocker`. The server supplies timestamps and keeps the latest 8 closures on the state card.
+
 When the active goal changes, add `current_goal`, `goal_change_type` (`set`, `revise`, `pause`, `resume`, `complete`, or `reopen`), and a concise `goal_reason` to the same call. The server records the change as a goal event and updates the authoritative Task goal. Do not update the goal for ordinary progress. Completing or reopening a Task is recorded on the goal timeline by the server.
 
 Progress messages use:

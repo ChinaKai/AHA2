@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 // agentCoreMCPMaxRequestBytes bounds one JSON-RPC request. The core MCP only
@@ -470,7 +471,7 @@ func coreMCPTools() []mcpTool {
 		{
 			Name: "task_get",
 			Description: "Read a bounded summary of this Task or another Task in the same Project. " +
-				"A Task in a different Project is refused. Available to every Agent in this Task.",
+				"Includes the current state card when present. A Task in a different Project is refused. Available to every Agent in this Task.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -508,6 +509,7 @@ func coreMCPTools() []mcpTool {
 			Description: "Update this Task's state card: the short note the Owner reads on the Task page and the " +
 				"next Turn reads in its prompt. Main Agent only. Call it before the final answer of every Turn; " +
 				"status, next_steps and open_questions replace what was there, so send the current picture, not a log. " +
+				"When several things are moving in parallel, record them as lines so the Owner and pet can see who can move them forward. " +
 				"A goal change goes in the same call.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -518,6 +520,7 @@ func coreMCPTools() []mcpTool {
 					},
 					"next_steps":     stringArray("What comes next, up to 6 short entries. Replaces the previous list; send [] when nothing is left."),
 					"open_questions": stringArray("Decisions waiting on the Owner, up to 6 entries. Replaces the previous list; send [] once they are answered."),
+					"lines":          taskLinePatchSchema(),
 					"add_constraints": stringArray("Standing decisions or limits the Owner stated that later Turns must keep (for example \"do not change the public API\"). " +
 						"Appended; at most 12 are kept."),
 					"remove_constraints": stringArray("Exact text of constraints that no longer apply."),
@@ -600,6 +603,31 @@ func coreMCPTools() []mcpTool {
 					},
 				},
 				"required": []string{"attachment_ids"}, "additionalProperties": false,
+			},
+		},
+	}
+}
+
+// taskLinePatchSchema describes the same merge contract as the HTTP endpoint.
+func taskLinePatchSchema() map[string]any {
+	text := func(description string) map[string]any {
+		return map[string]any{"type": "string", "maxLength": domain.TaskLineMaxTextRunes, "description": description}
+	}
+	return map[string]any{
+		"type": "array",
+		"description": "Merge by id. Omitted lines and fields stay as they were. Keep at most 8 lines that are not closed. " +
+			"For a new line send id, title, owner and state. Set state to closed to close a line and open to reopen it.",
+		"items": map[string]any{
+			"type": "object", "required": []string{"id"}, "additionalProperties": false,
+			"properties": map[string]any{
+				"id":    map[string]any{"type": "string", "pattern": domain.TaskLineIDPattern, "description": "Stable ID, unique within the Task."},
+				"title": text("What the line is about."),
+				"owner": map[string]any{"type": "string", "enum": []string{domain.TaskLineOwnerSelf, domain.TaskLineOwnerOwner, domain.TaskLineOwnerOther},
+					"description": "Who can move the line forward: the Task itself, the Owner, or someone else."},
+				"who":     text("Name the responsible person or team when owner is other."),
+				"state":   map[string]any{"type": "string", "enum": []string{domain.TaskLineOpen, domain.TaskLineWaiting, domain.TaskLineBlocked, domain.TaskLineClosed}},
+				"step":    text("Where the work stands, in one sentence."),
+				"blocker": text("What blocks the line. Send an empty string to clear it."),
 			},
 		},
 	}

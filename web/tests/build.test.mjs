@@ -4050,7 +4050,14 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   //   inline approve / reject (controller and copy in the chunk; main.ts
   //   wires it, the styles are shared): 229,795 JS + 58,432 CSS = 288,227.
   //   rail workspace column fix: 229,795 JS + 58,440 CSS = 288,235.
-  const FIRST_SCREEN_GZIP_BUDGET = 288256;
+  // task-813 4A adds the workstream renderer and bilingual state-card copy.
+  // From 17657f5 (228,679 JS + 58,080 CSS = 286,759), the same masked
+  // level-5 build measures 229,326 JS + 58,080 CSS = 287,406 (647 bytes
+  // of JS). Ceil to the next 256-byte boundary.
+  // Round 4 and 4A land together. The merged tree, same masked-query, level-5
+  // build: 230,425 JS + 58,440 CSS = 288,865. Ceil to the next 256-byte
+  // boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 289024;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
