@@ -56,9 +56,9 @@ SDK 返回的用户信息只有 `open_id` 与 `tenant_brand`，不返回 `tenant
 
 普通群以消息的 `thread_id` 判断话题。开启「接收全量消息」后，每群可选「全量唤醒」或「需 @」。默认 `topic_wake_mode=full`，机器人发过消息且免 @ 未被撤销的话题可以通过非 @ 消息唤醒。选择「需 @」（`mention`）后，话题内也需要 @ 机器人。顶层非 @、未参与话题和其余未达到唤醒条件的非 @ 消息进旁听，保留 7 天 / 每群最近 200 条，下次相应话题被唤醒时最多注入 4 KiB。关闭全量接收开关或权限后立即停止注入，已有记录到期由每小时的清理任务删除。
 
-参与从 v166 升级后开始记录。Core 在飞书确认接受出站消息时按渠道实例、群 ID、话题 ID 记录参与。优先使用飞书回复返回的 `thread_id`，缺省时使用领取投递时的目标话题。迁移保留现有群开关，历史投递没有参与记录。接收端在写入 Agent Inbox 前分流，旁听不会启动或接续 Task。插件仍会在 core 分流前解析话题引用和展开云文档链接，旁听只保存归一化正文的节选。可唤醒的同话题消息可以走 Live Inbox 交给正在运行的 Turn，未领取的消息留到下一轮。
+参与从 v166 升级后开始记录。Core 在飞书确认接受出站消息时按渠道实例、群 ID、话题 ID 记录参与。优先使用飞书回复返回的 `thread_id`，缺省或为空时使用领取投递时的目标话题。迁移保留现有群开关，历史投递没有参与记录。接收端在写入 Agent Inbox 前分流，旁听不会启动或接续 Task。插件仍会在 core 分流前解析话题引用和展开云文档链接，旁听只保存归一化正文的节选。可唤醒的同话题消息可以走 Live Inbox 交给正在运行的 Turn，未领取的消息留到下一轮。
 
-绑定 Task 和未绑定群的群聊电子人都可在问题处理完后调用 `aha2_channel.channel_revoke_topic_wake`。HTTP 入口为 `POST /api/v1/agent/channel/topic-wake/revoke`，沿用当前 Turn 的 Agent Capability。参数 `chat_id`、`thread_id` 来自 `channel-context.json`，可附 `reason`（最多 300 字）和 `inbound_receipt_id`（处理实时 Inbox 消息时使用）。服务端核对当前有效的会话路由与该 Turn 实际收到的 receipt。审计表 `channel_feishu_topic_revocations` 记录 Task、agent、Turn、receipt、时间、可选原因及后续恢复时间和发送者。群内新的 @ 唤醒并清除当前话题的撤销，能否接到其他机器人的 @ 取决于实际飞书授权和推送。「需 @」模式仍要求 @。原来的 `end` 结束本轮回复。
+绑定 Task 和未绑定群的群聊电子人都可在问题处理完后调用 `aha2_channel.channel_revoke_topic_wake`。HTTP 入口为 `POST /api/v1/agent/channel/topic-wake/revoke`，沿用当前 Turn 的 Agent Capability。参数 `chat_id`、`thread_id` 来自 `channel-context.json`，可附 `reason`（最多 300 字）和 `inbound_receipt_id`。省略 `inbound_receipt_id` 时，服务端选本轮已收到的最新话题回执，并核对当前有效的会话路由。撤销仍有效时重复调用会成功。如果话题已恢复且回执已经用过，需要本轮收到更新的回执才能再次撤销。审计表 `channel_feishu_topic_revocations` 记录 Task、agent、Turn、receipt、时间、可选原因及后续恢复时间和发送者。群内新的 @ 唤醒并清除当前话题的撤销，能否接到其他机器人的 @ 取决于实际飞书授权和推送。「需 @」模式仍要求 @。原来的 `end` 结束本轮回复。
 
 话题内回复从原消息发出，撤回时回到话题根消息。根消息已撤回或无法定位时，发送失败并保留投递记录。显式 @ 使用 owner 为当前 Task 选定的群成员，自动 @ 只提醒原消息发送者。
 

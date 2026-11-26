@@ -204,7 +204,7 @@ func channelTopicWakeMCPTool() mcpTool {
 				"chat_id":   map[string]any{"type": "string"},
 				"thread_id": map[string]any{"type": "string"},
 				"inbound_receipt_id": map[string]any{"type": "string",
-					"description": "Use this receipt when closing a topic after a live inbox message."},
+					"description": "Defaults to the latest receipt for this topic delivered to the current Turn. After restoration, use a newer receipt."},
 				"reason": map[string]any{"type": "string", "maxLength": 300},
 			},
 			"required": []string{"chat_id", "thread_id"}, "additionalProperties": false,

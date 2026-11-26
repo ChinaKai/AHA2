@@ -103,4 +103,20 @@ func TestFeishuTopicWakeUpgradeDoesNotBackfillParticipation(t *testing.T) {
 		instance.ID, chat).Scan(&got); err != nil || got != actualThread {
 		t.Fatalf("participation must follow the actual provider thread: %q, %v", got, err)
 	}
+
+	delivery = enqueueTestDelivery(t, database, instance, conversation, 3, now)
+	leased, err = database.ClaimChannelDeliveries(ctx, instance.ID, 1, now, time.Minute)
+	if err != nil || len(leased) != 1 || leased[0].Target["thread_id"] != "omt_old" {
+		t.Fatalf("claim delivery with a known topic target: %+v, %v", leased, err)
+	}
+	emptyThread := ""
+	if err := database.AckChannelDelivery(ctx, instance.ID, delivery.ID, leased[0].LeaseID, "om_empty_thread", "", &emptyThread, now); err != nil {
+		t.Fatal(err)
+	}
+	var participated bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM channel_feishu_topics WHERE instance_id=? AND chat_id=? AND thread_id='omt_old')`,
+		instance.ID, chat).Scan(&participated); err != nil || !participated {
+		t.Fatalf("empty provider thread must use the claimed topic: participated=%v, %v", participated, err)
+	}
 }

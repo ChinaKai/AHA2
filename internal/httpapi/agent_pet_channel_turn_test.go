@@ -289,18 +289,23 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	if err != nil || duplicate {
 		t.Fatalf("live receipt: %v, duplicate=%v", err, duplicate)
 	}
-	wait := agentRequest(t, server.URL+"/api/v1/agent/turn/inbox/wait", http.MethodPost, token, map[string]any{
-		"after_cursor": 0, "timeout_seconds": 3,
-	})
-	var batch struct {
-		Messages []domain.LiveInboxMessage `json:"messages"`
+	claimLive := func(t *testing.T, receiptID string) domain.LiveInboxMessage {
+		t.Helper()
+		wait := agentRequest(t, server.URL+"/api/v1/agent/turn/inbox/wait", http.MethodPost, token, map[string]any{
+			"after_cursor": 0, "timeout_seconds": 3,
+		})
+		var batch struct {
+			Messages []domain.LiveInboxMessage `json:"messages"`
+		}
+		decodeErr := json.NewDecoder(wait.Body).Decode(&batch)
+		wait.Body.Close()
+		if wait.StatusCode != http.StatusOK || decodeErr != nil || len(batch.Messages) != 1 ||
+			batch.Messages[0].Payload["channel_receipt_id"] != receiptID {
+			t.Fatalf("live inbox for receipt %s: status=%d messages=%v err=%v", receiptID, wait.StatusCode, batch.Messages, decodeErr)
+		}
+		return batch.Messages[0]
 	}
-	decodeErr := json.NewDecoder(wait.Body).Decode(&batch)
-	wait.Body.Close()
-	if wait.StatusCode != http.StatusOK || decodeErr != nil || len(batch.Messages) != 1 {
-		t.Fatalf("live inbox status=%d messages=%v err=%v", wait.StatusCode, batch.Messages, decodeErr)
-	}
-	live := batch.Messages[0]
+	live := claimLive(t, liveReceipt.ID)
 	if live.Source.Authority != "task_channel_participant" || live.Payload["channel_receipt_id"] != liveReceipt.ID {
 		t.Fatalf("live inbox lost sender authority or its receipt: %v", live)
 	}
@@ -364,17 +369,6 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		liveTarget["mention_user_ids"] != `["extra-provider-member-0"]` {
 		t.Fatalf("reply used the wrong live message target: %v err=%v", liveTarget, err)
 	}
-
-	// channel_reply_decision records the end decision for the group topic.
-	decision := coreMCPCallTool(t, url, token, "channel_reply_decision", map[string]any{"reason": "已在群里回复"})
-	if decision.IsError {
-		t.Fatalf("decision=%#v", decision)
-	}
-	stored, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_pet")
-	if err != nil || stored != "end" {
-		t.Fatalf("topic decision=%q err=%v", stored, err)
-	}
-	t.Logf("evidence channel_reply_decision status=%d isError=%v text=%s topic.decision=%s", decision.Status, decision.IsError, decision.Text, stored)
 
 	// Boundary: another Task's Turn cannot borrow task_pet's receipt.
 	otherTurn := createCoreTurn(t, database, base, "main", "batch-pet-route-other")
@@ -478,28 +472,38 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 
 		setMode(domain.FeishuTopicWakeMention)
 		send(externalChat, topic, "mention-mode-plain", "om_mention_mode_plain", "user", false, "listening", false)
-		if result := coreMCPCallTool(t, url, token, "channel_revoke_topic_wake", revoke(externalChat, topic, "")); result.IsError {
-			t.Fatalf("MCP revoke: %#v", result)
+		implicitRevoke := map[string]any{"chat_id": externalChat, "thread_id": topic, "reason": "验证完成"}
+		for range 2 {
+			if result := coreMCPCallTool(t, url, token, "channel_revoke_topic_wake", implicitRevoke); result.IsError {
+				t.Fatalf("MCP revoke: %#v", result)
+			}
 		}
-		send(externalChat, topic, "human-restore", "om_human_restore", "user", true, "received", false)
+		humanRestore := send(externalChat, topic, "human-restore", "om_human_restore", "user", true, "received", false)
+		claimLive(t, humanRestore.ID)
 		setMode(domain.FeishuTopicWakeFull)
 		send(externalChat, topic, "human-restored", "om_human_restored", "user", false, "received", false)
 		send(externalChat, "omt_other", "other-thread", "om_other_thread", "user", false, "listening", false)
 
-		response = agentRequest(t, revocationURL, http.MethodPost, token, revoke(externalChat, topic, liveReceipt.ID))
+		if result := coreMCPCallTool(t, url, token, "channel_revoke_topic_wake", implicitRevoke); result.IsError {
+			t.Fatalf("MCP revoke after restoration in the same Turn: %#v", result)
+		}
+		send(externalChat, topic, "revoked-again", "om_revoked_again", "user", false, "listening", false)
+		response = agentRequest(t, revocationURL, http.MethodPost, token, revoke(externalChat, topic, humanRestore.ID))
 		if response.StatusCode != http.StatusOK {
-			t.Fatalf("Agent API revoke with live receipt: status=%d body=%s", response.StatusCode, readBody(t, response))
+			t.Fatalf("Agent API retry of active revocation: status=%d body=%s", response.StatusCode, readBody(t, response))
 		}
 		response.Body.Close()
-		send(externalChat, topic, "revoked", "om_revoked", "user", false, "listening", false)
 		send(externalChat, topic, "replayed-old-mention", "om_human_restore", "user", true, "", true)
 		send(externalChat, topic, "still-revoked", "om_still_revoked", "user", false, "listening", false)
 		send(externalChat, topic, "bot-restore", "om_bot_restore", "app", true, "received", false)
-		response = agentRequest(t, revocationURL, http.MethodPost, token, revoke(externalChat, topic, liveReceipt.ID))
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("retry of restored action: status=%d body=%s", response.StatusCode, readBody(t, response))
+		if result := coreMCPCallTool(t, url, token, "channel_revoke_topic_wake", implicitRevoke); !refused(result) || !strings.Contains(result.Text, "newer receipt") {
+			t.Fatalf("MCP revoke with no newer delivered receipt: %#v", result)
 		}
-		response.Body.Close()
+		response = agentRequest(t, revocationURL, http.MethodPost, token, revoke(externalChat, topic, humanRestore.ID))
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusConflict || !strings.Contains(body, "feishu_topic_wake_restored") {
+			t.Fatalf("retry after restoration: status=%d body=%s", response.StatusCode, body)
+		}
 		send(externalChat, topic, "bot-restored", "om_bot_restored", "user", false, "received", false)
 
 		raw, err := sql.Open("sqlite", filepath.Join(dataDir, "aha2.db"))
@@ -512,8 +516,9 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 			SELECT COUNT(*),COUNT(NULLIF(restored_at,''))
 			FROM channel_feishu_topic_revocations
 			WHERE instance_id=? AND chat_id=? AND thread_id=? AND task_id=? AND agent_id='main' AND turn_id=?
+			  AND receipt_id IN (?,?)
 			  AND reason='验证完成' AND revoked_at<>'' AND restored_by IN ('topic-user','topic-app')
-		`, instance.ID, externalChat, topic, pet.ID, turn.ID).Scan(&records, &restored); err != nil || records != 2 || restored != 2 {
+		`, instance.ID, externalChat, topic, pet.ID, turn.ID, liveReceipt.ID, humanRestore.ID).Scan(&records, &restored); err != nil || records != 2 || restored != 2 {
 			t.Fatalf("revocation audit: records=%d restored=%d err=%v", records, restored, err)
 		}
 
@@ -567,4 +572,15 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		}
 		send(externalChat, topic, "original-group-unaffected", "om_original_unaffected", "user", false, "received", false)
 	})
+
+	// Record the end decision once the live receipt checks have finished.
+	decision := coreMCPCallTool(t, url, token, "channel_reply_decision", map[string]any{"reason": "已在群里回复"})
+	if decision.IsError {
+		t.Fatalf("decision=%#v", decision)
+	}
+	stored, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_pet")
+	if err != nil || stored != "end" {
+		t.Fatalf("topic decision=%q err=%v", stored, err)
+	}
+	t.Logf("evidence channel_reply_decision status=%d isError=%v text=%s topic.decision=%s", decision.Status, decision.IsError, decision.Text, stored)
 }

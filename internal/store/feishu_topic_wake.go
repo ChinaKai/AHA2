@@ -3,10 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+var ErrFeishuTopicWakeRestored = errors.New("topic wake has been restored. Use a newer receipt delivered to this Turn")
 
 const migrateFeishuTopicWakeSQL = `
 CREATE TABLE IF NOT EXISTS channel_feishu_topics (
@@ -68,8 +71,11 @@ func (s *Store) migrateFeishuTopicWake(ctx context.Context) error {
 }
 
 func recordFeishuTopicParticipation(ctx context.Context, tx *sql.Tx, instanceID, conversationID, deliveryID, leaseID string, providerThreadID *string, at time.Time) error {
-	// Prefer Feishu's response. When it omits the thread, use the target given
+	// Prefer Feishu's response. When it has no thread ID, use the target given
 	// to the plugin for this attempt, since a later inbound can change it.
+	if providerThreadID != nil && *providerThreadID == "" {
+		providerThreadID = nil
+	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO channel_feishu_topics(instance_id,chat_id,thread_id,participated_at)
 		SELECT i.id,c.external_chat_id,COALESCE(?,a.feishu_thread_id),?
@@ -136,6 +142,8 @@ func (s *Store) RevokeFeishuTopicWake(ctx context.Context, taskID, agentID, turn
 	defer tx.Rollback()
 	// Resolve the instance and authorization from a receipt delivered to this
 	// Turn. Allow the host only while it still owns the unbound group.
+	// If no receipt was specified, prefer the latest one so a new @mention
+	// delivered to this Turn can serve as the basis for a fresh revocation.
 	var instanceID, receiptID string
 	err = tx.QueryRowContext(ctx, `
 		SELECT c.instance_id,r.id
@@ -161,17 +169,35 @@ func (s *Store) RevokeFeishuTopicWake(ctx context.Context, taskID, agentID, turn
 		            AND bound.endpoint_id=c.endpoint_id AND bound.external_chat_id=c.external_chat_id
 		      ))
 		  )
-		ORDER BY a.sequence LIMIT 1
+		ORDER BY a.sequence DESC LIMIT 1
 	`, turnID, taskID, agentID, requestedReceipt, requestedReceipt, chatID, threadID).Scan(&instanceID, &receiptID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO channel_feishu_topic_revocations(instance_id,chat_id,thread_id,task_id,agent_id,turn_id,receipt_id,reason,revoked_at)
 		VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING
 	`, instanceID, chatID, threadID, taskID, agentID, turnID, receiptID, reason, timeString(at))
 	if err != nil {
 		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 0 {
+		// The topic can already be revoked, or this receipt's revocation can
+		// have been restored. Only the first case is an idempotent success.
+		var active bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(SELECT 1 FROM channel_feishu_topic_revocations
+			  WHERE instance_id=? AND chat_id=? AND thread_id=? AND restored_at='')
+		`, instanceID, chatID, threadID).Scan(&active); err != nil {
+			return err
+		}
+		if !active {
+			return ErrFeishuTopicWakeRestored
+		}
 	}
 	return tx.Commit()
 }

@@ -703,6 +703,8 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "knowledge_read_source_mismatch", "message": err.Error()})
 	case errors.Is(err, app.ErrAgentTurnInactive):
 		writeError(writer, http.StatusConflict, "agent_turn_inactive")
+	case errors.Is(err, store.ErrFeishuTopicWakeRestored):
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "feishu_topic_wake_restored", "message": err.Error()})
 	case errors.Is(err, app.ErrAgentCollaborationRequiresAuto):
 		writeJSON(writer, http.StatusForbidden, map[string]any{
 			"ok": false, "error": "collaboration_requires_auto_mode",
