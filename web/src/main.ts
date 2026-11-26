@@ -10020,6 +10020,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
         desk: view.desk,
         now: Date.now(),
       });
+      deskModule.bindPetDesk(body);
       bindOverviewActions();
       bindPetWatchActions();
       loadInsights(deskModule);
