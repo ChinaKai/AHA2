@@ -4043,7 +4043,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // CSS = 286,759); ceil to the next 256-byte boundary.
   //   approvals tab into records: 228,948 JS + 58,204 CSS = 287,152.
   //   Alt+P shortcut: 229,214 JS + 58,204 CSS = 287,418.
-  const FIRST_SCREEN_GZIP_BUDGET = 287488;
+  //   live overview refresh (timing, place keeping and the elapsed tick are
+  //   in the chunk; main.ts keeps the event, visibility and focus hooks):
+  //   229,615 JS + 58,223 CSS = 287,838.
+  const FIRST_SCREEN_GZIP_BUDGET = 288000;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

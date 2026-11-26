@@ -859,6 +859,12 @@ let petWorkbenchTab = "overview";
 // Set by an entry that means "handle pending approvals": the next overview
 // paint moves focus to the "for you" list (and brings it into view).
 let petWorkbenchFocusNeeds = false;
+// The live workbench page's overview refresher (at most one is mounted).
+type PetDeskRefresher = ReturnType<PetDeskModule["createPetDeskRefresher"]>;
+const petDeskRefreshers = new Set<PetDeskRefresher>();
+function notifyPetDesk(kind: "event" | "wake"): void {
+  petDeskRefreshers.forEach(refresher => kind === "event" ? refresher.notify() : refresher.wake());
+}
 // Records table of contents: wide screens start open, phones start folded. The
 // choice lives here, not in the rendered node, so switching tabs (which
 // replaces the body) keeps it for the rest of the session.
@@ -9610,6 +9616,7 @@ async function performListRefresh(): Promise<void> {
 // A hidden page pauses refresh traffic; on return, one coalesced catch-up runs.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
+  notifyPetDesk("wake");
   void refreshOnboarding();
   resumePetNavigation();
   if (listRefreshScheduler.pending()) listRefreshScheduler.request();
@@ -9628,6 +9635,7 @@ window.addEventListener("pointercancel", () => {
   appPointerActive = false;
   flushDeferredRender();
 });
+window.addEventListener("focus", () => notifyPetDesk("wake"));
 window.addEventListener("blur", () => {
   appPointerActive = false;
   taskListPointerActive = false;
@@ -9666,6 +9674,9 @@ function openGlobalEvents(): void {
       return;
     }
     if (type === "pet_approval") refreshPetApprovalState();
+    // A refresher only exists once the desk chunk has loaded, so the event
+    // classifier is read from the chunk too.
+    if (petDeskRefreshers.size && petDeskPage.loaded()?.petDeskRefreshEvent(type)) notifyPetDesk("event");
     if (eventRefreshesTaskList(type)) {
       refreshListData();
     }
@@ -9678,6 +9689,8 @@ function openGlobalEvents(): void {
   globalEvents.addEventListener("open", () => {
     refreshListData();
     refreshPetApprovalState();
+    // Events may have been missed while disconnected.
+    notifyPetDesk("wake");
     // A background Turn may have queued an open_task while no tab was
     // connected; claim it now that this session has a live event stream.
     resumePetNavigation();
@@ -9995,7 +10008,10 @@ async function bindPetWorkbenchPage(): Promise<void> {
         if (controller.signal.aborted && insightsController !== null) return;
         if (!host.isConnected || petWorkbenchPageKeeper.binding !== binding) return;
         // A timeout or failure is not cached: the next overview paint retries.
-        if (value) insights = value;
+        if (value) {
+          insights = value;
+          insightsReadAt = Date.now();
+        }
         paint(value);
       });
   };
@@ -10038,11 +10054,68 @@ async function bindPetWorkbenchPage(): Promise<void> {
       });
   };
 
+  // The overview follows the system: debounced events, a minimum interval,
+  // no stacked reads, a one-minute fallback poll and a 30-second tick for
+  // elapsed times, all only while the overview is showing and the document
+  // is visible. Records and settings stop it.
+  // `binding` and `loader` are assigned below, before the first load; the
+  // refresher only calls these after that.
+  const overviewLive = (): boolean => body.isConnected && petWorkbenchPageKeeper.binding === binding && active === "overview" && !document.hidden;
+  // Created from the route chunk on the first overview paint (the timing
+  // logic lives there, off the first screen).
+  let deskRefresher: PetDeskRefresher | null = null;
+  const ensureDeskRefresher = (module: PetDeskModule): PetDeskRefresher => {
+    if (deskRefresher) return deskRefresher;
+    deskRefresher = module.createPetDeskRefresher({
+      active: overviewLive,
+      refresh: async () => {
+        if (loader.busy()) return;
+        backgroundRead = true;
+        try { await loader.load(); } finally { backgroundRead = false; }
+      },
+      tick: () => module.tickPetDeskElapsed(body, Date.now(), t),
+    });
+    petDeskRefreshers.add(deskRefresher);
+    return deskRefresher;
+  };
+
+  // Freshness of the data on screen and whether the latest background
+  // refresh failed; painted into the desk's status row.
+  let fetchedAt = 0;
+  let refreshFailed = false;
+  let backgroundRead = false;
+  let insightsReadAt = 0;
+  const paintFreshness = (): void => {
+    petDeskPage.loaded()?.paintPetDeskUpdated(body, fetchedAt, refreshFailed);
+  };
+
+  // A background refresh repaints the overview without disturbing what the
+  // owner is doing: every block's scroll position, the open "later" list and
+  // last reply, the focused control and any inline reject input survive, and
+  // an open dialog is left alone (dialogs live outside the body).
+  const repaintOverviewKeepingState = (): void => {
+    const module = petDeskPage.loaded();
+    if (!module) {
+      renderTab();
+      return;
+    }
+    const saved = module.capturePetDeskState(body);
+    const inline = captureInlineDecision?.() ?? null;
+    renderTab();
+    module.restorePetDeskState(body, saved, inline === null);
+    if (inline) restoreInlineDecision?.(inline);
+  };
+  // Set by the inline approve/reject controls.
+  let captureInlineDecision: (() => unknown) | null = null;
+  let restoreInlineDecision: ((state: unknown) => void) | null = null;
+
   const renderTab = () => {
     active = mapPetWorkbenchTab(active);
     if (active !== "overview") {
       insightsController?.abort();
       insightsController = null;
+      // Records and settings do not refresh on a timer.
+      deskRefresher?.stop();
     }
     if (active !== "records") {
       recordsController?.abort();
@@ -10086,6 +10159,8 @@ async function bindPetWorkbenchPage(): Promise<void> {
       bindOverviewActions();
       bindPetWatchActions();
       loadInsights(deskModule);
+      paintFreshness();
+      ensureDeskRefresher(deskModule).start();
       if (petWorkbenchFocusNeeds) {
         petWorkbenchFocusNeeds = false;
         // "Handle pending approvals": bring the "for you" list into view and
@@ -10144,22 +10219,32 @@ async function bindPetWorkbenchPage(): Promise<void> {
     onData: value => {
       view = value;
       loadingMore = null;
-      // A full reload (event, save, retry) re-reads the last 7 days and the
-      // records data too.
-      insights = undefined;
+      fetchedAt = Date.now();
+      refreshFailed = false;
+      // A full reload (save, retry, tab entry) re-reads the last 7 days and
+      // the records data too. A background overview refresh re-reads the
+      // week at most once a minute.
+      const minimum = petDeskPage.loaded()?.PET_DESK_REFRESH.insightsMinMs ?? 0;
+      if (!backgroundRead || Date.now() - insightsReadAt >= minimum) insights = undefined;
       recordsData = undefined;
       void refreshPetPendingApprovalCount();
-      renderTab();
+      if (backgroundRead && active === "overview") repaintOverviewKeepingState();
+      else renderTab();
       if ((view.approvals || []).some(item => item.status === "executing")) scheduleApprovalExecutionPoll();
     },
     onError: message => {
       loadingMore = null;
       loadError = message;
       // A failed refresh of the records tab keeps the last good documents and
-      // approval history on screen with an inline error; the overview keeps
-      // its own refresh (see the desk refresher) and other tabs keep the
-      // original full retry state.
-      if (view && active === "records") renderTab();
+      // approval history on screen with an inline error. A failed background
+      // refresh of the overview keeps the desk and says so in the status row;
+      // the refresher tries again on the next event or poll. Other cases keep
+      // the original full retry state.
+      if (view && backgroundRead && active === "overview") {
+        loadError = "";
+        refreshFailed = true;
+        paintFreshness();
+      } else if (view && active === "records") renderTab();
       else {
         view = null;
         showLoadState();
@@ -10170,6 +10255,10 @@ async function bindPetWorkbenchPage(): Promise<void> {
   // Leaving the view releases the binding; that aborts the workbench read and
   // the last-7-days read together.
   const pageRequests = {dispose: () => {
+    if (deskRefresher) {
+      deskRefresher.stop();
+      petDeskRefreshers.delete(deskRefresher);
+    }
     insightsController?.abort();
     insightsController = null;
     recordsController?.abort();
@@ -10213,6 +10302,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
     if (active === "overview" || active === "records") renderTab();
   };
   const load = () => loader.load();
+
 
   // Live approval events use the same loader as user actions. An event during
   // an in-flight request queues exactly one follow-up so a commit that landed

@@ -339,6 +339,29 @@ export function petDeskElapsedText(since: unknown, now: number, key: string, tra
   return translate(key, {duration: petApprovalDurationText(minutes, translate)});
 }
 
+// deskElapsed is an elapsed-time label that can be recomputed in place: the
+// span keeps its start time and catalog key, so tickPetDeskElapsed rewrites
+// the text every half minute without a new read. "" when the time is unknown.
+function deskElapsed(since: unknown, now: number, key: string, translate: Translate): string {
+  const text = petDeskElapsedText(since, now, key, translate);
+  if (!text) return "";
+  return `<span class="pet-desk-elapsed" data-pet-desk-since="${escapeHTML(String(since))}" data-pet-desk-elapsed-key="${escapeHTML(key)}">${escapeHTML(text)}</span>`;
+}
+
+// tickPetDeskElapsed recomputes every elapsed-time label under root and
+// returns how many it updated.
+export function tickPetDeskElapsed(root: ParentNode, now: number, translate: Translate): number {
+  let updated = 0;
+  root.querySelectorAll<HTMLElement>("[data-pet-desk-since]").forEach(node => {
+    const text = petDeskElapsedText(node.dataset.petDeskSince, now, node.dataset.petDeskElapsedKey || "", translate);
+    if (text && node.textContent !== text) {
+      node.textContent = text;
+      updated++;
+    }
+  });
+  return updated;
+}
+
 function deskTotal(total: unknown, shown: number): number {
   const value = countValue(total);
   return value === null ? shown : Math.max(value, shown);
@@ -444,8 +467,8 @@ function renderDeskNeed(item: PetDeskNeed, position: number | null, options: Pet
   const taskLabel = deskTaskLabel(item);
   if (taskLabel && textValue(item.title) !== taskLabel) meta.push(deskText(taskLabel));
   if (kind === "approval" && textValue(item.risk)) meta.push(escapeHTML(petApprovalRiskLabel(String(item.risk), translate)));
-  const waited = petDeskElapsedText(item.since, now, "petWorkbench.desk.waited", translate);
-  if (waited) meta.push(escapeHTML(waited));
+  const waited = deskElapsed(item.since, now, "petWorkbench.desk.waited", translate);
+  if (waited) meta.push(waited);
   const target = isApproval
     ? `data-pet-approval-open="${escapeHTML(approvalID)}"`
     : taskID ? `data-pet-overview-task="${escapeHTML(taskID)}"` : "";
@@ -505,8 +528,8 @@ function renderDeskWait(item: PetDeskWait, options: PetOverviewOptions, now: num
     headline = deskTitleHTML(item, translate);
     meta.push(escapeHTML(translate("petWorkbench.desk.wait.other")));
   }
-  const waited = petDeskElapsedText(item.since, now, kind === "channel" ? "petWorkbench.desk.oldestWaited" : "petWorkbench.desk.waited", translate);
-  if (waited) meta.push(escapeHTML(waited));
+  const waited = deskElapsed(item.since, now, kind === "channel" ? "petWorkbench.desk.oldestWaited" : "petWorkbench.desk.waited", translate);
+  if (waited) meta.push(waited);
   const head = `<strong>${headline}</strong><small>${meta.join(" · ")}</small>`;
   const main = target
     ? `<button type="button" class="pet-desk-item-main" ${target}>${head}</button>`
@@ -524,8 +547,8 @@ function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: numbe
   const meta: string[] = [];
   const status = textValue(item.status);
   if (status) meta.push(escapeHTML(overviewStatusLabel(status, options)));
-  const ran = petDeskElapsedText(item.since, now, "petWorkbench.desk.ran", translate);
-  if (ran) meta.push(escapeHTML(ran));
+  const ran = deskElapsed(item.since, now, "petWorkbench.desk.ran", translate);
+  if (ran) meta.push(ran);
   const head = `<strong>${deskHeadlineHTML(item, translate)}</strong><small>${meta.join(" · ")}</small>`;
   const main = taskID
     ? `<button type="button" class="pet-desk-item-main" data-pet-overview-task="${escapeHTML(taskID)}">${head}</button>`
@@ -588,6 +611,7 @@ function renderDeskStatus(desk: PetDesk, options: PetOverviewOptions, totals: {n
     <span class="pet-desk-status-counts">${counts.map(text => `<span>${escapeHTML(text)}</span>`).join("")}</span>
     ${channelAlert}
     ${checked}
+    <small class="pet-desk-updated" data-pet-desk-updated role="status" aria-live="polite"></small>
   </section>`;
 }
 
@@ -631,14 +655,32 @@ export function petDeskReplyPreview(text: string): string {
 // The expand control's copy lives in this chunk, like the records copy, so
 // the shared first-screen catalog does not grow for a desk-only button.
 const PET_DESK_COPY = {
-  "zh-CN": {expand: "展开", collapse: "收起", emptyUnfollowed: "没有未关注的任务。"},
-  "en-US": {expand: "Expand", collapse: "Collapse", emptyUnfollowed: "No unfollowed tasks."},
+  "zh-CN": {expand: "展开", collapse: "收起", emptyUnfollowed: "没有未关注的任务。", updatedAt: "更新于 {time}", updateFailed: "刷新失败，稍后会再试；显示的是 {time} 的数据"},
+  "en-US": {expand: "Expand", collapse: "Collapse", emptyUnfollowed: "No unfollowed tasks.", updatedAt: "Updated {time}", updateFailed: "Refresh failed, will retry; showing data from {time}"},
 } satisfies Record<"zh-CN" | "en-US", Record<string, string>>;
 
 type PetDeskCopyKey = keyof typeof PET_DESK_COPY["en-US"];
 
-function deskCopy(key: PetDeskCopyKey): string {
-  return PET_DESK_COPY[currentLocale() === "en-US" ? "en-US" : "zh-CN"][key];
+function deskCopy(key: PetDeskCopyKey, values: Record<string, string> = {}): string {
+  return PET_DESK_COPY[currentLocale() === "en-US" ? "en-US" : "zh-CN"][key].replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? `{${name}}`);
+}
+
+// petDeskClock is HH:MM:SS in local time, the "updated at" stamp.
+export function petDeskClock(at: number): string {
+  const date = new Date(at);
+  if (!Number.isFinite(at) || Number.isNaN(date.getTime())) return "";
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// paintPetDeskUpdated writes the status row's freshness note: when the data
+// on screen was fetched, and whether the last refresh failed.
+export function paintPetDeskUpdated(root: ParentNode, fetchedAt: number, failed: boolean): void {
+  const node = root.querySelector<HTMLElement>("[data-pet-desk-updated]");
+  if (!node || !fetchedAt) return;
+  const time = petDeskClock(fetchedAt);
+  node.textContent = deskCopy(failed ? "updateFailed" : "updatedAt", {time});
+  node.classList.toggle("failed", failed);
 }
 
 // A reply this short, without markers or line breaks, already fits the
@@ -1122,4 +1164,210 @@ export function renderPetKnowledgeHealth(health: PetKnowledgeHealth | null | und
     }).join("")}</ul>`
     : "";
   return `<span class="pet-record-knowledge-summary"><strong>${escapeHTML(translate("petWorkbench.records.knowledgeTitle"))}</strong> ${escapeHTML(parts.join(" · "))}</span>${list}`;
+}
+
+/* Live overview refresh (task-813 round 4) ----------------------------------- */
+
+// Global event types that change what the overview shows. Task, Turn and
+// Round events move items between "for you", "waiting", "running" and the
+// last reply (the same prefixes the task list refreshes on, minus knowledge:
+// the overview shows no knowledge). pet_approval adds or settles approvals
+// and ideas; pet_event is a knowledge-sync note in the pet's work state.
+// pet_state and pet_action are the pet character's animation and speech and
+// do not change the desk, so they are not listed.
+const PET_DESK_EVENT_PREFIXES = ["task_", "turn_", "round_"];
+const PET_DESK_EVENT_TYPES = ["pet_approval", "pet_event"];
+
+export function petDeskRefreshEvent(type: string): boolean {
+  return PET_DESK_EVENT_TYPES.includes(type) || PET_DESK_EVENT_PREFIXES.some(prefix => type.startsWith(prefix));
+}
+
+export const PET_DESK_REFRESH = {
+  /** A burst of events collapses into one refresh this long after the last. */
+  debounceMs: 1000,
+  /** Two refreshes are at least this far apart. */
+  minIntervalMs: 3000,
+  /** Fallback refresh while the overview is visible. */
+  pollMs: 60_000,
+  /** Elapsed times ("waited 5 min") are recomputed this often without a read. */
+  tickMs: 30_000,
+  /** The last-7-days block is re-read at most this often. */
+  insightsMinMs: 60_000,
+} as const;
+
+export interface PetDeskRefresherOptions {
+  /** Read the workbench; resolves when it settles. */
+  refresh: () => Promise<unknown>;
+  /** Repaint elapsed times from the data already on screen. */
+  tick: () => void;
+  /** True while the overview tab is mounted and the document is visible. */
+  active: () => boolean;
+  now?: () => number;
+  setTimer?: (callback: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}
+
+export interface PetDeskRefresher {
+  /** An event that may change the overview arrived. */
+  notify: () => void;
+  /** Refresh now (visibility regained, focus, reconnect), still rate limited. */
+  wake: () => void;
+  /** Start or resume the fallback poll and the elapsed-time tick. */
+  start: () => void;
+  /** Stop every timer (left the overview, page hidden or released). */
+  stop: () => void;
+  /** For tests: whether a read is in flight. */
+  busy: () => boolean;
+}
+
+// createPetDeskRefresher owns the overview's refresh timing: events are
+// debounced, refreshes keep a minimum interval, a read in flight is never
+// doubled (one follow-up is queued instead), and a fallback poll and an
+// elapsed-time tick run only while active() holds. Time and timers are
+// injectable so the behaviour is testable without waiting.
+export function createPetDeskRefresher(options: PetDeskRefresherOptions): PetDeskRefresher {
+  const now = options.now ?? Date.now;
+  const setTimer = options.setTimer ?? ((callback: () => void, ms: number) => globalThis.setTimeout(callback, ms));
+  const clearTimer = options.clearTimer ?? ((handle: unknown) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
+  let pending: unknown = null;
+  let poll: unknown = null;
+  let tick: unknown = null;
+  let inFlight = false;
+  let queued = false;
+  let lastStart = Number.NEGATIVE_INFINITY;
+  let running = false;
+
+  const clear = (handle: unknown) => { if (handle !== null) clearTimer(handle); };
+
+  const run = (): void => {
+    pending = null;
+    if (!options.active()) return;
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+    const wait = lastStart + PET_DESK_REFRESH.minIntervalMs - now();
+    if (wait > 0) {
+      schedule(wait);
+      return;
+    }
+    inFlight = true;
+    lastStart = now();
+    void Promise.resolve().then(options.refresh).catch(() => undefined).finally(() => {
+      inFlight = false;
+      if (queued) {
+        queued = false;
+        schedule(0);
+      }
+      armPoll();
+    });
+  };
+
+  const schedule = (ms: number): void => {
+    clear(pending);
+    pending = setTimer(run, Math.max(0, ms));
+  };
+
+  const armPoll = (): void => {
+    clear(poll);
+    poll = running ? setTimer(() => { poll = null; schedule(0); }, PET_DESK_REFRESH.pollMs) : null;
+  };
+
+  const armTick = (): void => {
+    clear(tick);
+    tick = running ? setTimer(() => {
+      tick = null;
+      if (options.active()) options.tick();
+      armTick();
+    }, PET_DESK_REFRESH.tickMs) : null;
+  };
+
+  return {
+    notify() {
+      if (!running) return;
+      schedule(PET_DESK_REFRESH.debounceMs);
+    },
+    wake() {
+      if (!running) return;
+      schedule(0);
+    },
+    start() {
+      if (running) return;
+      running = true;
+      armPoll();
+      armTick();
+    },
+    stop() {
+      running = false;
+      queued = false;
+      clear(pending); clear(poll); clear(tick);
+      pending = poll = tick = null;
+    },
+    busy: () => inFlight,
+  };
+}
+
+/* Keeping the owner's place across a background repaint ------------------- */
+
+// petDeskNodeKey is a CSS selector that finds the same control again after
+// the overview repaints: the block id plus the control's data attribute and
+// target (for example the scroll area of #pet-desk-needs, or the button that
+// opens approval a-1). "" when the node has no stable identity.
+export function petDeskNodeKey(node: HTMLElement): string {
+  const block = node.closest<HTMLElement>("[id]");
+  const scope = block?.id ? `#${CSS.escape(block.id)}` : "";
+  if (node.id) return `#${CSS.escape(node.id)}`;
+  for (const attribute of ["data-pet-approval-open", "data-pet-overview-task", "data-pet-desk-approve", "data-pet-desk-reject", "data-pet-watch-task"]) {
+    const value = node.getAttribute(attribute);
+    if (value !== null) return `${scope} [${attribute}="${CSS.escape(value)}"]${node.classList.contains("pet-desk-item-main") ? ".pet-desk-item-main" : ""}`.trim();
+  }
+  for (const className of ["pet-desk-scroll", "pet-follow-body", "pet-desk-col", "pet-desk-later-body", "pet-desk-reply-full"]) {
+    if (node.classList.contains(className)) {
+      if (className === "pet-desk-col") return `.pet-desk-col.${CSS.escape(node.classList[1] || "")}`;
+      return scope ? `${scope} .${className}` : "";
+    }
+  }
+  return "";
+}
+
+
+const PET_DESK_SCROLLERS = ".pet-desk-scroll, .pet-follow-body, .pet-desk-col, .pet-desk-later-body, .pet-desk-reply-full";
+
+export interface PetDeskPlace {
+  scrolls: Array<[string, number]>;
+  laterOpen: boolean;
+  replyOpen: boolean;
+  focused: string;
+}
+
+// capturePetDeskState records what the owner did to the overview: every
+// block's scroll position, the open "later" list and reply, and the focused
+// control. restorePetDeskState puts it back after the repaint.
+export function capturePetDeskState(root: HTMLElement): PetDeskPlace {
+  const scrolls: Array<[string, number]> = [];
+  root.querySelectorAll<HTMLElement>(PET_DESK_SCROLLERS).forEach(node => {
+    const key = petDeskNodeKey(node);
+    if (key && node.scrollTop) scrolls.push([key, node.scrollTop]);
+  });
+  const active = document.activeElement;
+  return {
+    scrolls,
+    laterOpen: root.querySelector<HTMLDetailsElement>("#pet-desk-later")?.open ?? false,
+    replyOpen: root.querySelector("[data-pet-desk-reply-toggle]")?.getAttribute("aria-expanded") === "true",
+    focused: active instanceof HTMLElement && root.contains(active) ? petDeskNodeKey(active) : "",
+  };
+}
+
+export function restorePetDeskState(root: HTMLElement, place: PetDeskPlace, restoreFocus: boolean): void {
+  const later = root.querySelector<HTMLDetailsElement>("#pet-desk-later");
+  if (later && place.laterOpen) later.open = true;
+  if (place.replyOpen) {
+    const toggle = root.querySelector<HTMLButtonElement>("[data-pet-desk-reply-toggle]");
+    if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+  }
+  for (const [key, top] of place.scrolls) {
+    const node = root.querySelector<HTMLElement>(key);
+    if (node) node.scrollTop = top;
+  }
+  if (restoreFocus && place.focused) root.querySelector<HTMLElement>(place.focused)?.focus({preventScroll: true});
 }

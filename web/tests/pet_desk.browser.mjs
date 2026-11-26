@@ -205,6 +205,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/pet/workbench") {
     const limit = Number(url.searchParams.get("approval_limit") || 50);
     window.__workbenchQueries.push(limit);
+    if (window.__workbenchFailAfter && window.__workbenchQueries.length > 1) return json({ok: false, error: "workbench_refresh_failed"}, 500);
     const history = params.get("history") === "1";
     const approvals = history ? historyApprovals.slice(0, limit) : limit >= 200 ? allApprovals : pageApprovals;
     return json({
@@ -229,11 +230,18 @@ window.fetch = async (input, init = {}) => {
   if (path.startsWith("/api/v1/")) return json({ok: true});
   return json({});
 };
+// The global stream can be driven from the test: __emit(type) sends an
+// "update" event, __reopen() fires "open" as after a reconnect.
+window.__sources = [];
 window.EventSource = class {
-  constructor(url) { this.url = String(url); }
-  close() {}
-  addEventListener() {}
+  constructor(url) { this.url = String(url); this.listeners = {}; window.__sources.push(this); }
+  close() { this.closed = true; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
 };
+window.__emit = type => { for (const source of window.__sources) if (!source.closed && source.url.startsWith("/api/v1/events")) for (const fn of source.listeners.update || []) fn({data: JSON.stringify({type, data: {}})}); };
+window.__reopen = () => { for (const source of window.__sources) if (!source.closed && source.url.startsWith("/api/v1/events")) for (const fn of source.listeners.open || []) fn({}); };
+// ?workbench=fail-after makes every workbench read after the first fail.
+window.__workbenchFailAfter = params.get("workbench") === "fail-after";
 sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "pet-workbench"}));
 `;
 
@@ -624,6 +632,106 @@ try {
   assert.match(await keyPage.locator(".command-palette-option").first().innerText(), /Pet workbench · Alt\+P/);
   await keyPage.keyboard.press("Escape");
   await keyPage.close();
+
+  // Round 4, item 5: the overview follows the system. The page's clock is
+  // installed before the app loads so timers can be driven without waiting.
+  const livePage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  livePage.on("pageerror", error => errors.push(error.message));
+  await livePage.clock.install();
+  await livePage.goto(`${url}/?desk=large&watches=huge`, {waitUntil: "domcontentloaded"});
+  await livePage.clock.runFor(2000);
+  await livePage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  const reads = () => livePage.evaluate(() => window.__workbenchQueries.length);
+  assert.match(await livePage.locator("[data-pet-desk-updated]").innerText(), /^Updated \d\d:\d\d:\d\d$/, "the status row shows when the data was fetched");
+  // State the owner made: a scrolled block, an open "later" list, an open
+  // reply, a scrolled follow list.
+  await livePage.locator("#pet-desk-needs .pet-desk-scroll").evaluate(el => { el.scrollTop = 200; });
+  await livePage.locator("#pet-overview-ignored .pet-follow-body").evaluate(el => { el.scrollTop = 300; });
+  await livePage.locator("#pet-desk-later summary").click();
+  await livePage.locator("[data-pet-desk-reply-toggle]").click();
+  const baseReads = await reads();
+  // A burst of ten events (and events the desk ignores) is one read after
+  // the debounce.
+  await livePage.evaluate(() => { for (let i = 0; i < 10; i++) window.__emit(i % 2 ? "turn_running" : "task_status_changed"); window.__emit("pet_state"); window.__emit("pet_action"); });
+  await livePage.clock.runFor(500);
+  assert.equal(await reads(), baseReads, "inside the debounce");
+  await livePage.clock.runFor(1000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length === base + 1, baseReads);
+  await livePage.clock.runFor(4000);
+  assert.equal(await reads(), baseReads + 1, "one read for the burst");
+  // The repaint kept the owner's state.
+  assert.equal(await livePage.locator("#pet-desk-needs .pet-desk-scroll").evaluate(el => el.scrollTop), 200, "block scroll kept");
+  assert.equal(await livePage.locator("#pet-overview-ignored .pet-follow-body").evaluate(el => el.scrollTop), 300, "follow list scroll kept");
+  assert.equal(await livePage.locator("#pet-desk-later").evaluate(el => el.open), true, "later list stays open");
+  assert.equal(await livePage.locator("[data-pet-desk-reply-toggle]").getAttribute("aria-expanded"), "true", "reply stays open");
+  // A dialog stays open through a refresh: the default desk's idea.
+  await livePage.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await livePage.clock.runFor(2000);
+  await livePage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  await livePage.locator("#pet-desk-later summary").click();
+  await livePage.locator('#pet-desk-later .pet-desk-item-main[data-pet-approval-open="idea-1"]').click();
+  await livePage.waitForSelector("dialog.pet-approval-detail-dialog[open]");
+  const dialogReads = await reads();
+  await livePage.evaluate(() => window.__emit("pet_approval"));
+  await livePage.clock.runFor(5000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, dialogReads);
+  assert.equal(await livePage.locator("dialog.pet-approval-detail-dialog[open]").count(), 1, "the detail dialog survives a refresh");
+  await livePage.click("dialog.pet-approval-detail-dialog [data-pet-approval-detail-close]");
+  // The one-minute fallback poll, and reconnect, focus and visibility wakes.
+  let before = await reads();
+  await livePage.clock.runFor(61_000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, before);
+  before = await reads();
+  await livePage.evaluate(() => window.__reopen());
+  await livePage.clock.runFor(4000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, before);
+  before = await reads();
+  await livePage.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await livePage.clock.runFor(4000);
+  await livePage.waitForFunction(base => window.__workbenchQueries.length > base, before);
+  // Elapsed labels move on their own every 30 seconds without a read. The
+  // fake clock moves Date.now, so after ten minutes "waited 1 h 30 min" is
+  // "waited 1 h 40 min" before any request.
+  // Mark the node: a repaint would replace it, so a still-marked node with a
+  // new text was updated in place by the tick, not by a read.
+  const firstWait = livePage.locator("#pet-desk-needs .pet-desk-elapsed").first();
+  const waitedBefore = await firstWait.innerText();
+  await firstWait.evaluate(el => { el.dataset.probe = "kept"; });
+  await livePage.clock.runFor(10 * 60_000);
+  const after = await livePage.evaluate(() => {
+    const node = document.querySelector('#pet-desk-needs .pet-desk-elapsed[data-probe="kept"]');
+    return node ? node.textContent : null;
+  });
+  // Ten minutes include polls that repaint; check the tick on a fresh mark.
+  await firstWait.evaluate(el => { el.dataset.probe = "tick"; });
+  const textAtMark = await firstWait.innerText();
+  await livePage.clock.runFor(31_000);
+  const ticked = await livePage.evaluate(() => document.querySelector('#pet-desk-needs .pet-desk-elapsed[data-probe="tick"]')?.textContent ?? null);
+  assert.ok(after !== null || ticked !== null, "an elapsed label was updated in place at least once");
+  assert.notEqual(textAtMark, waitedBefore, `ten minutes later the label moved (${waitedBefore} -> ${textAtMark})`);
+  // The records and settings tabs do not refresh on a timer.
+  await livePage.click('[data-pet-workbench-tab="settings"]');
+  await livePage.waitForSelector("#pet-settings-host");
+  before = await reads();
+  await livePage.clock.runFor(180_000);
+  await livePage.evaluate(() => window.__emit("task_status_changed"));
+  await livePage.clock.runFor(5000);
+  assert.equal(await reads(), before, "no overview refresh from the settings tab");
+  await livePage.close();
+  // A failing refresh keeps the desk and says so; the next try runs again.
+  const failPage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  failPage.on("pageerror", error => errors.push(error.message));
+  await failPage.clock.install();
+  await failPage.goto(`${url}/?workbench=fail-after`, {waitUntil: "domcontentloaded"});
+  await failPage.clock.runFor(2000);
+  await failPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  const stamp = await failPage.locator("[data-pet-desk-updated]").innerText();
+  await failPage.evaluate(() => window.__emit("task_status_changed"));
+  await failPage.clock.runFor(3000);
+  await failPage.waitForFunction(() => document.querySelector("[data-pet-desk-updated]")?.classList.contains("failed"), null, {timeout: 10000});
+  assert.match(await failPage.locator("[data-pet-desk-updated]").innerText(), new RegExp(`^Refresh failed, will retry; showing data from ${stamp.replace("Updated ", "")}$`));
+  assert.equal(await failPage.locator("#pet-workbench-body .pet-desk").count(), 1, "the desk stays on screen");
+  await failPage.close();
 
   // Step three, items 9-11: the records tab.
   await openOverview(page);
