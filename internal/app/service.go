@@ -65,22 +65,23 @@ type ExecutionEvent struct {
 // MemoryUpdate is one write to the Task state card. Every field is optional;
 // a nil pointer leaves that part of the card as it is. Status, NextSteps and
 // OpenQuestions replace what was there, constraints are added or removed one
-// by one, and a goal change is recorded as a goal event in the same call.
+// by one, lines are merged by ID, and a goal change is recorded in the same call.
 type MemoryUpdate struct {
-	CurrentGoal       *string   `json:"current_goal,omitempty"`
-	GoalChangeType    string    `json:"goal_change_type,omitempty"`
-	GoalReason        string    `json:"goal_reason,omitempty"`
-	Status            *string   `json:"status,omitempty"`
-	NextSteps         *[]string `json:"next_steps,omitempty"`
-	OpenQuestions     *[]string `json:"open_questions,omitempty"`
-	AddConstraints    []string  `json:"add_constraints,omitempty"`
-	RemoveConstraints []string  `json:"remove_constraints,omitempty"`
+	CurrentGoal       *string                `json:"current_goal,omitempty"`
+	GoalChangeType    string                 `json:"goal_change_type,omitempty"`
+	GoalReason        string                 `json:"goal_reason,omitempty"`
+	Status            *string                `json:"status,omitempty"`
+	NextSteps         *[]string              `json:"next_steps,omitempty"`
+	OpenQuestions     *[]string              `json:"open_questions,omitempty"`
+	Lines             []domain.TaskLinePatch `json:"lines,omitempty"`
+	AddConstraints    []string               `json:"add_constraints,omitempty"`
+	RemoveConstraints []string               `json:"remove_constraints,omitempty"`
 }
 
 // Empty reports whether the update would change nothing.
 func (update MemoryUpdate) Empty() bool {
 	return update.CurrentGoal == nil && update.Status == nil && update.NextSteps == nil &&
-		update.OpenQuestions == nil && len(update.AddConstraints) == 0 && len(update.RemoveConstraints) == 0
+		update.OpenQuestions == nil && update.Lines == nil && len(update.AddConstraints) == 0 && len(update.RemoveConstraints) == 0
 }
 
 type KnowledgeCandidate struct {
@@ -2404,21 +2405,12 @@ func cleanMemoryItems(field string, values []string, limit int) ([]string, error
 	return result, nil
 }
 
-func (s *Service) applyMemoryUpdate(ctx context.Context, task domain.Task, turn domain.Turn, memory domain.TaskMemory, update MemoryUpdate) error {
-	if update.Empty() {
-		return fmt.Errorf("memory update is empty")
-	}
-	now := s.now().UTC()
-	memory.TaskID = task.ID
-	memory.CurrentGoal = task.CurrentGoal
-
-	// Validate everything before the goal event is written, so a rejected
-	// update never leaves a goal change behind.
+func applyMemoryUpdate(memory *domain.TaskMemory, turn domain.Turn, now time.Time, update MemoryUpdate) (*domain.TaskGoalChange, error) {
 	touchedNow := false
 	if update.Status != nil {
 		status := strings.TrimSpace(*update.Status)
 		if len([]rune(status)) > domain.TaskMemoryStatusMaxRunes {
-			return fmt.Errorf("status holds at most %d characters; describe where the work stands, not its history", domain.TaskMemoryStatusMaxRunes)
+			return nil, fmt.Errorf("status holds at most %d characters; describe where the work stands, not its history", domain.TaskMemoryStatusMaxRunes)
 		}
 		memory.Status = status
 		touchedNow = true
@@ -2426,7 +2418,7 @@ func (s *Service) applyMemoryUpdate(ctx context.Context, task domain.Task, turn 
 	if update.NextSteps != nil {
 		items, err := cleanMemoryItems("next_steps", *update.NextSteps, domain.TaskMemoryMaxNextSteps)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		memory.NextSteps = items
 		touchedNow = true
@@ -2434,7 +2426,7 @@ func (s *Service) applyMemoryUpdate(ctx context.Context, task domain.Task, turn 
 	if update.OpenQuestions != nil {
 		items, err := cleanMemoryItems("open_questions", *update.OpenQuestions, domain.TaskMemoryMaxOpenQuestion)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		memory.OpenQuestions = items
 		touchedNow = true
@@ -2455,7 +2447,7 @@ func (s *Service) applyMemoryUpdate(ctx context.Context, task domain.Task, turn 
 	if len(update.AddConstraints) > 0 {
 		added, err := cleanMemoryItems("add_constraints", update.AddConstraints, domain.TaskMemoryMaxConstraints)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		existing := map[string]bool{}
 		for _, note := range memory.Constraints {
@@ -2468,14 +2460,14 @@ func (s *Service) applyMemoryUpdate(ctx context.Context, task domain.Task, turn 
 			memory.Constraints = append(memory.Constraints, domain.TaskMemoryNote{Text: text, TurnID: turn.ID, CreatedAt: now})
 		}
 		if len(memory.Constraints) > domain.TaskMemoryMaxConstraints {
-			return fmt.Errorf("constraints hold at most %d entries; remove one that no longer applies first", domain.TaskMemoryMaxConstraints)
+			return nil, fmt.Errorf("constraints hold at most %d entries; remove one that no longer applies first", domain.TaskMemoryMaxConstraints)
 		}
 	}
 	var goalEvent *domain.TaskGoalChange
 	if update.CurrentGoal != nil {
 		goal := strings.TrimSpace(*update.CurrentGoal)
 		if goal == "" || len([]rune(goal)) > 2000 {
-			return fmt.Errorf("current goal is invalid")
+			return nil, fmt.Errorf("current goal is invalid")
 		}
 		changeType := strings.TrimSpace(update.GoalChangeType)
 		if changeType == "" {
@@ -2483,26 +2475,19 @@ func (s *Service) applyMemoryUpdate(ctx context.Context, task domain.Task, turn 
 		}
 		reason := strings.TrimSpace(update.GoalReason)
 		if reason == "" {
-			return fmt.Errorf("goal_reason is required with current_goal: say why the goal changed")
+			return nil, fmt.Errorf("goal_reason is required with current_goal: say why the goal changed")
 		}
 		goalEvent = &domain.TaskGoalChange{
-			TaskID: task.ID, RoundID: turn.RoundID, TurnID: turn.ID,
+			TaskID: memory.TaskID, RoundID: turn.RoundID, TurnID: turn.ID,
 			SourceMessageID: turn.InputMessageID, GoalAfter: goal,
 			ChangeType: changeType, Reason: reason, CreatedAt: now,
 		}
-	}
-	if goalEvent != nil {
-		if err := s.store.UpdateTaskGoalWithEvent(ctx, *goalEvent); err != nil {
-			return err
-		}
-		memory.CurrentGoal = goalEvent.GoalAfter
 	}
 	if touchedNow {
 		memory.StatusTurnID = turn.ID
 		memory.StatusUpdatedAt = now
 	}
-	memory.UpdatedAt = now
-	return s.store.UpsertTaskMemory(ctx, memory)
+	return goalEvent, nil
 }
 
 // recordTaskLifecycleGoalEvent puts a Task status change on the goal timeline.

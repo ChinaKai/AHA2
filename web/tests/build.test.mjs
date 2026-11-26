@@ -4034,7 +4034,11 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // and one bind call in main.ts. From 061d1cf (228,671 JS + 57,418 CSS =
   // 286,089) the same masked-query, level-5 build measures 228,679 JS +
   // 58,080 CSS = 286,759. Ceil to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 286976;
+  // task-813 4A adds the workstream renderer and bilingual state-card copy.
+  // From 17657f5 (228,679 JS + 58,080 CSS = 286,759), the same masked
+  // level-5 build measures 229,326 JS + 58,080 CSS = 287,406 (647 bytes
+  // of JS). Ceil to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 287488;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 // petDeskBatchSize keeps every IN list far below SQLite's bound-variable
@@ -18,6 +20,7 @@ type TaskStateCard struct {
 	StatusUpdatedAt time.Time
 	NextSteps       []string
 	OpenQuestions   []string
+	Lines           []domain.TaskLine
 }
 
 // TaskStateCards reads the state cards of many Tasks at once. A Task that
@@ -43,7 +46,7 @@ func (s *Store) TaskStateCards(ctx context.Context, taskIDs []string) (map[strin
 
 func (s *Store) taskStateCardBatch(ctx context.Context, args []any, result map[string]TaskStateCard) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT task_id,status,status_updated_at,next_steps_json,open_questions_json
+		SELECT task_id,status,status_updated_at,next_steps_json,open_questions_json,lines_json
 		FROM task_memory WHERE task_id IN (`+placeholders(len(args))+`)`, args...)
 	if err != nil {
 		return err
@@ -51,13 +54,14 @@ func (s *Store) taskStateCardBatch(ctx context.Context, args []any, result map[s
 	defer rows.Close()
 	for rows.Next() {
 		var item TaskStateCard
-		var statusUpdatedAt, nextSteps, openQuestions string
-		if err := rows.Scan(&item.TaskID, &item.Status, &statusUpdatedAt, &nextSteps, &openQuestions); err != nil {
+		var statusUpdatedAt, nextSteps, openQuestions, lines string
+		if err := rows.Scan(&item.TaskID, &item.Status, &statusUpdatedAt, &nextSteps, &openQuestions, &lines); err != nil {
 			return err
 		}
 		item.StatusUpdatedAt = parseTime(statusUpdatedAt)
 		item.NextSteps = decodeJSON(nextSteps, []string{})
 		item.OpenQuestions = decodeJSON(openQuestions, []string{})
+		item.Lines = decodeJSON[[]domain.TaskLine](lines, nil)
 		result[item.TaskID] = item
 	}
 	return rows.Err()

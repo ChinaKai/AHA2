@@ -25,7 +25,7 @@ type databaseCategoryDef struct {
 // Tables missing here are reported under "other" as read-only.
 var databaseCatalog = []databaseCategoryDef{
 	{"A", "tasks", domain.DatabaseSafetyKeep, "", []string{
-		"tasks", "task_agents", "task_rounds", "turns", "task_goal_events", "task_memory",
+		"tasks", "task_agents", "task_rounds", "turns", "task_goal_events", "task_line_events", "task_memory",
 		"task_permission_requests", "collaboration_batches", "collaboration_events",
 		"collaboration_members", "agent_session_handoffs", "runtime_config_snapshots", "backend_sessions",
 	}},

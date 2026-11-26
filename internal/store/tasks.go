@@ -1184,23 +1184,31 @@ func (s *Store) ListBackendSessionsForTasks(ctx context.Context, taskIDs []strin
 }
 
 func (s *Store) TaskMemory(ctx context.Context, taskID string) (domain.TaskMemory, error) {
-	var item domain.TaskMemory
-	var nextSteps, constraints, openQuestions, extra, statusUpdatedAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT task_id,current_goal,status,status_turn_id,status_updated_at,next_steps_json,constraints_json,open_questions_json,extra_json,updated_at
-		FROM task_memory WHERE task_id=?`, taskID).
-		Scan(&item.TaskID, &item.CurrentGoal, &item.Status, &item.StatusTurnID, &statusUpdatedAt,
-			&nextSteps, &constraints, &openQuestions, &extra, &updatedAt)
-	item.StatusUpdatedAt = parseTime(statusUpdatedAt)
-	item.NextSteps = decodeJSON(nextSteps, []string{})
-	item.Constraints = decodeJSON(constraints, []domain.TaskMemoryNote{})
-	item.OpenQuestions = decodeJSON(openQuestions, []string{})
-	item.Extra = decodeJSON(extra, map[string]any{})
-	item.UpdatedAt = parseTime(updatedAt)
+	item, err := readTaskMemory(ctx, s.db, taskID)
 	if err != nil {
 		return item, err
 	}
 	item.GoalHistory, err = s.TaskGoalHistory(ctx, taskID, 20)
+	return item, err
+}
+
+func readTaskMemory(ctx context.Context, query interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, taskID string) (domain.TaskMemory, error) {
+	var item domain.TaskMemory
+	var nextSteps, constraints, openQuestions, lines, extra, statusUpdatedAt, updatedAt string
+	err := query.QueryRowContext(ctx, `
+		SELECT task_id,current_goal,status,status_turn_id,status_updated_at,next_steps_json,constraints_json,open_questions_json,lines_json,extra_json,updated_at
+		FROM task_memory WHERE task_id=?`, taskID).
+		Scan(&item.TaskID, &item.CurrentGoal, &item.Status, &item.StatusTurnID, &statusUpdatedAt,
+			&nextSteps, &constraints, &openQuestions, &lines, &extra, &updatedAt)
+	item.StatusUpdatedAt = parseTime(statusUpdatedAt)
+	item.NextSteps = decodeJSON(nextSteps, []string{})
+	item.Constraints = decodeJSON(constraints, []domain.TaskMemoryNote{})
+	item.OpenQuestions = decodeJSON(openQuestions, []string{})
+	item.Lines = decodeJSON[[]domain.TaskLine](lines, nil)
+	item.Extra = decodeJSON(extra, map[string]any{})
+	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
 }
 
@@ -1247,6 +1255,13 @@ func (s *Store) UpdateTaskGoalWithEvent(ctx context.Context, event domain.TaskGo
 		return err
 	}
 	defer tx.Rollback()
+	if err := updateTaskGoalWithEvent(ctx, tx, event); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateTaskGoalWithEvent(ctx context.Context, tx *sql.Tx, event domain.TaskGoalChange) error {
 	if err := tx.QueryRowContext(ctx, `SELECT current_goal FROM tasks WHERE id=?`, event.TaskID).Scan(&event.GoalBefore); err != nil {
 		return err
 	}
@@ -1264,7 +1279,7 @@ func (s *Store) UpdateTaskGoalWithEvent(ctx context.Context, event domain.TaskGo
 	}
 	if event.GoalBefore == event.GoalAfter && event.ChangeType != "pause" &&
 		event.ChangeType != "resume" && event.ChangeType != "complete" && event.ChangeType != "reopen" {
-		return tx.Commit()
+		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET current_goal=?,updated_at=? WHERE id=?`,
 		event.GoalAfter, timeString(event.CreatedAt), event.TaskID); err != nil {
@@ -1274,10 +1289,7 @@ func (s *Store) UpdateTaskGoalWithEvent(ctx context.Context, event domain.TaskGo
 		event.GoalAfter, timeString(event.CreatedAt), event.TaskID); err != nil {
 		return err
 	}
-	if err := insertTaskGoalEventTx(ctx, tx, event); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return insertTaskGoalEventTx(ctx, tx, event)
 }
 
 func validGoalChangeType(value string) bool {
@@ -1324,8 +1336,15 @@ func notesOrEmpty(values []domain.TaskMemoryNote) []domain.TaskMemoryNote {
 	return values
 }
 
+// UpsertTaskMemory writes the legacy card fields. Lines are only written with their events.
 func (s *Store) UpsertTaskMemory(ctx context.Context, item domain.TaskMemory) error {
-	_, err := s.db.ExecContext(ctx, `
+	return upsertTaskMemory(ctx, s.db, item)
+}
+
+func upsertTaskMemory(ctx context.Context, query interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, item domain.TaskMemory) error {
+	_, err := query.ExecContext(ctx, `
 		INSERT INTO task_memory(task_id,current_goal,status,status_turn_id,status_updated_at,next_steps_json,constraints_json,open_questions_json,extra_json,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(task_id) DO UPDATE SET current_goal=excluded.current_goal,status=excluded.status,

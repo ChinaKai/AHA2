@@ -159,11 +159,17 @@ func TestTaskStateCardRendersInTheTaskSection(t *testing.T) {
 		Status: "Fix written; integration tests pending.", StatusTurnID: "turn-2",
 		NextSteps: []string{"Run integration tests"}, OpenQuestions: []string{"Fix the log leak too?"},
 		Constraints: []domain.TaskMemoryNote{{Text: "Do not change the public API"}},
+		Lines: []domain.TaskLine{
+			{ID: "lab-run", Title: "Device verification", Owner: "other", Who: "QA team", State: "waiting", Step: "Build is ready", Blocker: "Waiting for the bench"},
+			{ID: "done-line", Title: "Completed handoff", Owner: "self", State: "closed"},
+		},
 	}
 	prompt := build(fresh)
 	for _, expected := range []string{
 		"## Task state card", "where things stand: Fix written; integration tests pending.",
 		"Run integration tests", "Do not change the public API", "Fix the log leak too?",
+		"Give each parallel effort a `lines` entry", "The Owner and pet use them", "Skip lines for a single piece of work",
+		"lab-run: Device verification (owner: other / QA team, state: waiting) | step: Build is ready | blocker: Waiting for the bench",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("state card is missing %q:\n%s", expected, prompt)
@@ -172,8 +178,40 @@ func TestTaskStateCardRendersInTheTaskSection(t *testing.T) {
 	if strings.Contains(prompt, "ended without updating this card") {
 		t.Fatal("a card written by the latest Main Turn was reported stale")
 	}
-	if strings.Index(prompt, "## Task state card") > strings.Index(prompt, "## Current Inbox Batch") {
-		t.Fatal("the state card must be read before the Inbox")
+	assertLinePlacement := func(prompt, cardHeading, linesHeading, inboxHeading string) {
+		t.Helper()
+		cardAt := strings.Index(prompt, cardHeading)
+		linesAt := strings.Index(prompt, linesHeading)
+		inboxAt := strings.Index(prompt, inboxHeading)
+		if cardAt < 0 || linesAt < 0 || inboxAt < 0 {
+			t.Fatalf("missing state card, lines or Inbox anchor: card=%d lines=%d inbox=%d", cardAt, linesAt, inboxAt)
+		}
+		if !(cardAt < linesAt && linesAt < inboxAt) {
+			t.Fatal("the lines must appear within the state card before the Inbox")
+		}
+		if strings.Contains(prompt, "Completed handoff") || strings.Contains(prompt, "done-line") {
+			t.Fatal("closed work appeared in the active lines")
+		}
+	}
+	assertLinePlacement(prompt, "## Task state card", "- active lines:", "## Current Inbox Batch")
+
+	zh := fresh
+	zh.Language = domain.LanguageSimplified
+	zhPrompt := build(zh)
+	for _, expected := range []string{
+		"同时在推进几件事时，用 `lines` 分开记", "做完一条就标为 `closed`", "只有一件事时不用分线",
+		"owner 和宠物靠这些记录判断", "lab-run：Device verification（负责方：other / QA team，状态：waiting）｜进展：Build is ready｜卡点：Waiting for the bench",
+	} {
+		if !strings.Contains(zhPrompt, expected) {
+			t.Fatalf("Chinese prompt is missing %q:\n%s", expected, zhPrompt)
+		}
+	}
+	assertLinePlacement(zhPrompt, "## 任务状态卡", "- 未闭环分线：", "## 当前 Inbox 批次")
+
+	linesOnly := base
+	linesOnly.Memory = domain.TaskMemory{Lines: fresh.Memory.Lines}
+	if linesPrompt := build(linesOnly); !strings.Contains(linesPrompt, "## Task state card") || !strings.Contains(linesPrompt, "lab-run") {
+		t.Fatal("a state card containing only lines was omitted")
 	}
 
 	stale := fresh

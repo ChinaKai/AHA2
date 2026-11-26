@@ -2,6 +2,19 @@ export type Locale = "zh-CN" | "en-US";
 export type LanguagePreference = "auto" | Locale;
 
 const zhCN: Record<string, string> = {
+  "task.memory.lines": "分线",
+  "task.memory.self": "任务自己",
+  "task.memory.owner": "你",
+  "task.memory.other": "其他人",
+  "task.memory.open": "在推进",
+  "task.memory.waiting": "等负责方",
+  "task.memory.blocked": "卡住",
+  "task.memory.closed": "已闭环",
+  "task.memory.responsible": "负责方",
+  "task.memory.step": "进展",
+  "task.memory.blocker": "卡点",
+  "task.memory.closedCount": "已闭环 {count} 条",
+  "task.memory.history": "最近 {count}/20 次 · 新的在上",
   "workspaceViewer.open": "打开工作区",
   "workspaceViewer.unavailable": "该任务的工作区或工作树不可用。",
   "workspaceViewer.transport": "无法通过当前连接读取工作区。SSH 和 WSL 需要支持 Python 3 的 Unix 环境。",
@@ -900,6 +913,19 @@ const zhCN: Record<string, string> = {
 };
 
 const enUS: Record<string, string> = {
+  "task.memory.lines": "Workstreams",
+  "task.memory.self": "The Task",
+  "task.memory.owner": "You",
+  "task.memory.other": "Someone else",
+  "task.memory.open": "In progress",
+  "task.memory.waiting": "Waiting",
+  "task.memory.blocked": "Blocked",
+  "task.memory.closed": "Closed",
+  "task.memory.responsible": "Responsible",
+  "task.memory.step": "Progress",
+  "task.memory.blocker": "Blocker",
+  "task.memory.closedCount": "Closed workstreams ({count})",
+  "task.memory.history": "Latest {count}/20 · newest first",
   "workspaceViewer.open": "Open Workspace",
   "workspaceViewer.unavailable": "This task’s workspace or worktree is unavailable.",
   "workspaceViewer.transport": "Unable to read the workspace over this connection. SSH and WSL require a Unix environment with Python 3.",

@@ -306,6 +306,7 @@ type templateData struct {
 	MemoryNextSteps     []string
 	MemoryConstraints   []string
 	MemoryOpenQuestions []string
+	MemoryLines         []domain.TaskLine
 }
 
 // applyMemoryCard copies the Task state card into the template data. Only a
@@ -323,6 +324,11 @@ func applyMemoryCard(data *templateData, input BuildInput) {
 	data.MemoryStatus = strings.TrimSpace(memory.Status)
 	data.MemoryNextSteps = memory.NextSteps
 	data.MemoryOpenQuestions = memory.OpenQuestions
+	for _, line := range memory.Lines {
+		if line.State != domain.TaskLineClosed {
+			data.MemoryLines = append(data.MemoryLines, line)
+		}
+	}
 	for _, note := range memory.Constraints {
 		if text := strings.TrimSpace(note.Text); text != "" {
 			data.MemoryConstraints = append(data.MemoryConstraints, text)
@@ -339,7 +345,7 @@ func applyMemoryCard(data *templateData, input BuildInput) {
 	}
 	data.MemoryStale = lastMainTurnID != "" && memory.StatusTurnID != lastMainTurnID
 	hasContent := data.MemoryStatus != "" || len(data.MemoryNextSteps) > 0 ||
-		len(data.MemoryConstraints) > 0 || len(data.MemoryOpenQuestions) > 0
+		len(data.MemoryConstraints) > 0 || len(data.MemoryOpenQuestions) > 0 || len(data.MemoryLines) > 0
 	data.MemoryCard = hasContent || data.MemoryStale
 }
 
@@ -349,7 +355,7 @@ func NewEngine(repository Repository) *Engine {
 
 var builtinTemplates = []domain.PromptTemplate{
 	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 4},
-	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 5},
+	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 6},
 	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 2},
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 2},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 2},
@@ -370,11 +376,11 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.mail", Name: "Mail Context File", Layer: "context", Description: "mail.md 的非敏感邮件上下文模板；不含凭据、正文或收件人历史", Editable: true, Required: false, Version: 1},
 	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 3},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
-	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要、任务状态卡", Editable: true, Required: true, Version: 3},
+	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要、任务状态卡", Editable: true, Required: true, Version: 4},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 4},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 17},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 18},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }

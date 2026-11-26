@@ -1265,7 +1265,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"reason":  map[string]any{"type": "string", "description": "为什么需要这项权限；必填"},
 			}, "required": []string{"permission", "enabled", "reason"},
 		}},
-		{Name: "aha_task_detail", Description: "只读查看一个 Task 的状态、目标、状态卡（state_card：现在到哪、下一步、等 owner 决定的事）和最近一次 Turn 的错误/结果", Parameters: map[string]any{
+		{Name: "aha_task_detail", Description: "只读查看一个 Task 的状态、目标、状态卡（state_card：现在到哪、下一步、分线、等 owner 决定的事）和最近一次 Turn 的错误/结果", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id"},

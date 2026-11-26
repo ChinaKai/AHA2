@@ -116,7 +116,12 @@ func (s *Server) agentTaskStatus(writer http.ResponseWriter, request *http.Reque
 		writeAgentControlError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": item, "turns": turns})
+	memory, err := s.store.TaskMemory(request.Context(), item.ID)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": item, "turns": turns, "memory": compactTaskMemory(memory)})
 }
 
 func (s *Server) updateAgentMemory(writer http.ResponseWriter, request *http.Request) {

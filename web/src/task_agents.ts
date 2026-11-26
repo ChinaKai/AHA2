@@ -1,8 +1,8 @@
 import {icon} from "./icons.js";
-import {t} from "./i18n.js";
+import {formatLocaleDateTime, t, tr} from "./i18n.js";
 import {fastModeFieldHTML, proxyOptionsHTML, runtimeBackendChoices, runtimeFieldsHTML} from "./runtime_picker.js";
 import type {RuntimeSelection} from "./runtime_picker.js";
-import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskActivity, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
+import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskActivity, TaskAgent, TaskContextDetail, TaskDetail, TaskLine, TaskMemory, Turn} from "./types.js";
 import {stableTextSignature} from "./ui_helpers.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
@@ -295,16 +295,32 @@ export function renderTaskContextSummary(detail: TaskDetail): string {
   ).join("<br>") || "-";
 }
 
+function renderTaskLines(lines: TaskLine[]): string {
+  if (!lines.length) return "";
+  const active = lines.filter(line => line.state !== "closed");
+  const closed = lines.filter(line => line.state === "closed");
+  const list = (items: TaskLine[]) => items.length ? `<ul class="memory-list">${items.map(line => {
+    const owner = line.owner === "other" && line.who ? line.who : t(`task.memory.${line.owner}`);
+    const updated = memoryTime(line.updated_at);
+    return `<li><strong data-i18n-ignore>${escapeHTML(line.title)}</strong> · ${t(`task.memory.${line.state}`)}
+      <div>${t("task.memory.responsible")} <span data-i18n-ignore>${escapeHTML(owner)}</span>${updated ? `<time datetime="${escapeHTML(line.updated_at)}">${escapeHTML(updated)}</time>` : ""}</div>
+      ${line.step ? `<div>${t("task.memory.step")} <span data-i18n-ignore>${escapeHTML(line.step)}</span></div>` : ""}
+      ${line.blocker ? `<div>${t("task.memory.blocker")} <span data-i18n-ignore>${escapeHTML(line.blocker)}</span></div>` : ""}</li>`;
+  }).join("")}</ul>` : "";
+  return `<section class="memory-section memory-lines"><header><strong>${t("task.memory.lines")}</strong></header>${list(active)}
+    ${closed.length ? `<details><summary>${t("task.memory.closedCount", {count: closed.length})}</summary>${list(closed)}</details>` : ""}</section>`;
+}
+
 function memoryTime(value?: string): string {
   // The server sends a zero time for "never"; treat anything before 2000 as unset.
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime()) || date.getFullYear() < 2000) return "";
-  return date.toLocaleString([], {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"});
+  return formatLocaleDateTime(date, {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"});
 }
 
 function memoryList(items: string[], ordered: boolean): string {
-  if (!items.length) return `<p class="memory-empty">暂无</p>`;
+  if (!items.length) return `<p class="memory-empty">${tr("暂无")}</p>`;
   const tag = ordered ? "ol" : "ul";
   return `<${tag} class="memory-list">${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</${tag}>`;
 }
@@ -319,7 +335,7 @@ export function renderTaskMemory(memory?: TaskMemory, turns: Turn[] = []): strin
   const history = [...(memory?.goal_history || [])].slice(-20);
   const latestGoal = history[history.length - 1];
   const goalMeta = latestGoal
-    ? `<small class="memory-meta">${escapeHTML([memoryTime(latestGoal.created_at), labels[latestGoal.change_type] || latestGoal.change_type].filter(Boolean).join(" · "))}${latestGoal.reason ? ` · ${escapeHTML(latestGoal.reason)}` : ""}</small>`
+    ? `<small class="memory-meta">${escapeHTML([memoryTime(latestGoal.created_at), tr(labels[latestGoal.change_type] || latestGoal.change_type)].filter(Boolean).join(" · "))}${latestGoal.reason ? ` · ${escapeHTML(latestGoal.reason)}` : ""}</small>`
     : "";
 
   const statusTurn = turns.find(turn => turn.id === memory?.status_turn_id);
@@ -329,7 +345,7 @@ export function renderTaskMemory(memory?: TaskMemory, turns: Turn[] = []): strin
   const stale = Boolean(lastMain) && lastMain.id !== (memory?.status_turn_id || "");
   const updated = [statusTurn ? `Turn #${statusTurn.sequence}` : "", memoryTime(memory?.status_updated_at)].filter(Boolean).join(" · ");
   const staleNote = stale
-    ? `<p class="memory-stale">${memory?.status_turn_id ? "最近一轮结束时没有更新这张卡，内容可能已经过时。" : "Agent 还没有写过这张卡。"}</p>`
+    ? `<p class="memory-stale">${tr(memory?.status_turn_id ? "最近一轮结束时没有更新这张卡，内容可能已经过时。" : "Agent 还没有写过这张卡。")}</p>`
     : "";
 
   const constraints = memory?.constraints || [];
@@ -338,29 +354,30 @@ export function renderTaskMemory(memory?: TaskMemory, turns: Turn[] = []): strin
         const when = memoryTime(note.created_at);
         return `<li>${escapeHTML(note.text)}${when ? `<time>${escapeHTML(when)}</time>` : ""}</li>`;
       }).join("")}</ul>`
-    : `<p class="memory-empty">暂无</p>`;
+    : `<p class="memory-empty">${tr("暂无")}</p>`;
 
   // Newest first: the change the reader is looking for is almost always the last one.
   const timeline = [...history].reverse().map(event => {
     const date = memoryTime(event.created_at);
     const before = event.goal_before && event.goal_before !== event.goal_after
-      ? `<details class="memory-goal-before"><summary>调整前的目标</summary><p>${escapeHTML(event.goal_before)}</p></details>`
+      ? `<details class="memory-goal-before"><summary>${tr("调整前的目标")}</summary><p>${escapeHTML(event.goal_before)}</p></details>`
       : "";
     return `<li class="memory-goal-event">
-      <div class="memory-goal-event-head"><span>${escapeHTML(labels[event.change_type] || event.change_type)}</span>${date ? `<time>${escapeHTML(date)}</time>` : ""}</div>
+      <div class="memory-goal-event-head"><span>${escapeHTML(tr(labels[event.change_type] || event.change_type))}</span>${date ? `<time>${escapeHTML(date)}</time>` : ""}</div>
       <p class="memory-goal-reason">${escapeHTML(event.reason || "-")}</p>
       <div class="memory-goal-transition"><strong>${escapeHTML(event.goal_after || "-")}</strong></div>${before}
     </li>`;
   }).join("");
 
   return `<div class="memory-card">
-    <section class="memory-goal"><header><strong>目标</strong></header><p>${escapeHTML(memory?.current_goal || "-")}</p>${goalMeta}</section>
-    <section class="memory-section"><header><strong>现在到哪了</strong>${updated ? `<small>${escapeHTML(updated)}</small>` : ""}</header>${staleNote}${memory?.status ? `<p class="memory-status">${escapeHTML(memory.status)}</p>` : `<p class="memory-empty">暂无</p>`}</section>
-    <section class="memory-section"><header><strong>下一步</strong></header>${memoryList(memory?.next_steps || [], true)}</section>
-    <section class="memory-section"><header><strong>已定的约束</strong></header>${constraintList}</section>
-    <section class="memory-section"><header><strong>等你决定</strong></header>${memoryList(memory?.open_questions || [], false)}</section>
+    <section class="memory-goal"><header><strong>${tr("目标")}</strong></header><p>${escapeHTML(memory?.current_goal || "-")}</p>${goalMeta}</section>
+    <section class="memory-section"><header><strong>${tr("现在到哪了")}</strong>${updated ? `<small>${escapeHTML(updated)}</small>` : ""}</header>${staleNote}${memory?.status ? `<p class="memory-status">${escapeHTML(memory.status)}</p>` : `<p class="memory-empty">${tr("暂无")}</p>`}</section>
+    <section class="memory-section"><header><strong>${tr("下一步")}</strong></header>${memoryList(memory?.next_steps || [], true)}</section>
+    <section class="memory-section"><header><strong>${tr("已定的约束")}</strong></header>${constraintList}</section>
+    <section class="memory-section"><header><strong>${tr("等你决定")}</strong></header>${memoryList(memory?.open_questions || [], false)}</section>
+    ${renderTaskLines(memory?.lines || [])}
   </div>
-  <details class="memory-goal-timeline"><summary><strong>目标变更</strong><small>最近 ${history.length}/20 次 · 新的在上</small></summary>${timeline ? `<ol>${timeline}</ol>` : `<p class="memory-empty">尚无目标变更记录</p>`}</details>`;
+  <details class="memory-goal-timeline"><summary><strong>${tr("目标变更")}</strong><small>${t("task.memory.history", {count: history.length})}</small></summary>${timeline ? `<ol>${timeline}</ol>` : `<p class="memory-empty">${tr("尚无目标变更记录")}</p>`}</details>`;
 }
 
 function renderOrchestrationCard(item: ConversationItem, detail: TaskDetail): string {

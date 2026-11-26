@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -382,5 +383,39 @@ func TestPetReadsTaskStateCardQuestions(t *testing.T) {
 		if item.ID == task.ID && (item.OwnerQuestions != 0 || item.Title != "") {
 			t.Fatalf("private followed task leaked details: %+v", item)
 		}
+	}
+}
+
+func TestPetReadsTaskWithOnlyLinesInStateCard(t *testing.T) {
+	fixture := newPetDeskFixture(t)
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.task("task-only-lines", domain.TaskWaitingUser, time.Minute)
+	title, who, owner, state := "Test device", "Lab team", "other", "waiting"
+	if err := fixture.database.UpdateTaskMemory(fixture.ctx, task.ID, domain.Turn{}, fixture.now,
+		[]domain.TaskLinePatch{{ID: "device", Title: &title, Owner: &owner, Who: &who, State: &state}},
+		func(*domain.TaskMemory) (*domain.TaskGoalChange, error) { return nil, nil }); err != nil {
+		t.Fatal(err)
+	}
+	args, err := json.Marshal(map[string]string{"task_id": task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := fixture.service.PetMCPTool(fixture.ctx, "aha_task_detail", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result PetTaskDetail
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if card := result.StateCard; card == nil || len(card.Lines) != 1 || card.Lines[0].Who != who ||
+		card.Lines[0].Title != title || !card.Lines[0].OpenedAt.Equal(fixture.now) {
+		t.Fatalf("pet state card omitted or changed the line: %s", body)
 	}
 }

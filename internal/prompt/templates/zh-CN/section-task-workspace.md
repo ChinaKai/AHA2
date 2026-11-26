@@ -18,4 +18,6 @@
 - 已定的约束（一直遵守，除非 owner 改口）：{{range .MemoryConstraints}}
   - {{.}}{{end}}{{end}}{{if .MemoryOpenQuestions}}
 - 等 owner 决定：{{range .MemoryOpenQuestions}}
-  - {{.}}{{end}}{{end}}{{end}}
+  - {{.}}{{end}}{{end}}{{if .MemoryLines}}
+- 未闭环分线：{{range .MemoryLines}}
+  - {{.ID}}：{{.Title}}（负责方：{{.Owner}}{{if .Who}} / {{.Who}}{{end}}，状态：{{.State}}）{{if .Step}}｜进展：{{.Step}}{{end}}{{if .Blocker}}｜卡点：{{.Blocker}}{{end}}{{end}}{{end}}{{end}}

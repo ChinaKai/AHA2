@@ -236,6 +236,12 @@ func TestTaskDetailSurvivesPanickingSection(t *testing.T) {
 // usage decoration.
 func TestTaskDetailParallelQueriesKeepResponseSemantics(t *testing.T) {
 	fixture := newTaskDetailFixture(t, true)
+	title, owner, state := "Device verification", "self", "open"
+	if err := fixture.database.UpdateTaskMemory(context.Background(), fixture.task.ID, domain.Turn{}, time.Now().UTC(),
+		[]domain.TaskLinePatch{{ID: "device", Title: &title, Owner: &owner, State: &state}},
+		func(*domain.TaskMemory) (*domain.TaskGoalChange, error) { return nil, nil }); err != nil {
+		t.Fatal(err)
+	}
 	sections := getTaskDetailSections(t, fixture)
 	for _, key := range []string{
 		"ok", "task", "latest_round", "turns", "agents", "memory", "hardware",
@@ -266,6 +272,9 @@ func TestTaskDetailParallelQueriesKeepResponseSemantics(t *testing.T) {
 	}
 	if detail.Task.ID != fixture.task.ID || detail.Memory.CurrentGoal != "keep the same JSON" {
 		t.Fatalf("task/memory sections changed: %#v %#v", detail.Task, detail.Memory)
+	}
+	if len(detail.Memory.Lines) != 1 || detail.Memory.Lines[0].ID != "device" || detail.Memory.Lines[0].Title != title {
+		t.Fatalf("owner read did not return lines: %+v", detail.Memory)
 	}
 	if detail.LatestRound.ID == "" || len(detail.Turns) != 1 || detail.Turns[0].RoundID != detail.LatestRound.ID {
 		t.Fatalf("round/turn relationship changed: round=%#v turns=%#v", detail.LatestRound, detail.Turns)

@@ -4397,6 +4397,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateFeishuTopicWake(ctx); err != nil {
 		return fmt.Errorf("apply schema v166 Feishu topic wake: %w", err)
 	}
+	if err := s.migrateTaskLines(ctx); err != nil {
+		return fmt.Errorf("apply schema v167 task lines: %w", err)
+	}
 	return nil
 }
 

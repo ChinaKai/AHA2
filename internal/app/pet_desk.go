@@ -401,18 +401,19 @@ func (s *Service) petDeskHardware(ctx context.Context, taskID string) []string {
 // PetTaskStateCard is the Task's own "where it stands" note as the pet reads
 // it: the short status, what comes next and what waits on the Owner.
 type PetTaskStateCard struct {
-	Status        string   `json:"status,omitempty"`
-	NextSteps     []string `json:"next_steps,omitempty"`
-	OpenQuestions []string `json:"open_questions,omitempty"`
-	UpdatedAt     string   `json:"updated_at,omitempty"`
+	Status        string            `json:"status,omitempty"`
+	NextSteps     []string          `json:"next_steps,omitempty"`
+	OpenQuestions []string          `json:"open_questions,omitempty"`
+	Lines         []domain.TaskLine `json:"lines,omitempty"`
+	UpdatedAt     string            `json:"updated_at,omitempty"`
 }
 
 func petTaskStateCard(card store.TaskStateCard) *PetTaskStateCard {
-	if strings.TrimSpace(card.Status) == "" && len(card.NextSteps) == 0 && len(card.OpenQuestions) == 0 {
+	if strings.TrimSpace(card.Status) == "" && len(card.NextSteps) == 0 && len(card.OpenQuestions) == 0 && len(card.Lines) == 0 {
 		return nil
 	}
 	view := &PetTaskStateCard{
-		Status: truncateAssistantText(card.Status, 600), NextSteps: card.NextSteps, OpenQuestions: card.OpenQuestions,
+		Status: truncateAssistantText(card.Status, 600), NextSteps: card.NextSteps, OpenQuestions: card.OpenQuestions, Lines: card.Lines,
 	}
 	if !card.StatusUpdatedAt.IsZero() {
 		view.UpdatedAt = card.StatusUpdatedAt.Format(time.RFC3339)

@@ -682,6 +682,7 @@ type TaskMemory struct {
 	NextSteps       []string         `json:"next_steps,omitempty"`
 	Constraints     []TaskMemoryNote `json:"constraints,omitempty"`
 	OpenQuestions   []string         `json:"open_questions,omitempty"`
+	Lines           []TaskLine       `json:"lines,omitempty"`
 	GoalHistory     []TaskGoalChange `json:"goal_history,omitempty"`
 	Extra           map[string]any   `json:"extra,omitempty"`
 	UpdatedAt       time.Time        `json:"updated_at"`
