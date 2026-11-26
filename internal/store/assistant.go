@@ -334,13 +334,13 @@ func (s *Store) MarkOpenPetEvents(ctx context.Context, kinds, ids []string, stat
 	return int(changed), nil
 }
 
-// PetCreatedTaskIDs returns every Task id the pet created, oldest first. The
-// work-state briefing uses this instead of the bounded recent-event list so an
-// old, still-open Task cannot silently fall out of the pet's view.
+// PetCreatedTaskIDs returns the local Task IDs the pet created directly or
+// through takeover, oldest first. This includes events outside the recent
+// history window so older open Tasks remain visible.
 func (s *Store) PetCreatedTaskIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT detail FROM pet_events
-		WHERE kind='task_created' AND detail<>''
+		WHERE detail<>'' AND (kind='task_created' OR (kind='task_takeover' AND actor='pet'))
 		GROUP BY detail
 		ORDER BY MIN(at), detail`)
 	if err != nil {

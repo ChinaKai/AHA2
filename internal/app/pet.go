@@ -287,17 +287,21 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	return PetBrainResult{}, nil
 }
 
-// petHasPendingWork reports whether a wake has work to do: a pet-created Task
-// still open or needing attention, an unresolved background notification, or an
-// agenda item the pet marked as its own next step. Items that wait on the Owner
-// are not work for the pet; a wake cannot move them. When the state cannot be
+// petHasPendingWork reports whether a wake has work to do: an open Task the
+// pet created or took over, an unresolved background notification, or an
+// agenda item the pet marked as its own next step. When the state cannot be
 // read the answer is "yes", so a failure never turns work time into free time.
 func (s *Service) petHasPendingWork(ctx context.Context) bool {
 	state, err := s.PetWorkState(ctx)
 	if err != nil {
 		return true
 	}
-	if len(state.OpenTasks) > 0 || state.Inspection.AttentionTasks > 0 || len(state.Notifications) > 0 {
+	for _, task := range state.OpenTasks {
+		if task.CreatedByPet {
+			return true
+		}
+	}
+	if len(state.Notifications) > 0 {
 		return true
 	}
 	for _, line := range strings.Split(state.Agenda, "\n") {
@@ -481,9 +485,9 @@ func petAutonomousMessage(english bool, idleMinutes int, page string, layout Pet
 // minutes.
 func petWakeActionContract(english bool) string {
 	if english {
-		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, ignored_tasks, core/agenda.md and pending approvals. Leave ignored_tasks on hold unless the Owner explicitly asks you to act, even if an older event, agenda or loop entry mentions them. Work through these in order:\n0) Before new work, pick the oldest open Task with created_by_pet=true. Verify it before completing or cancelling it. For a real blocker, file one kind=owner_decision approval with task_id in the payload. Escalate waiting/blocked Tasks when a decision is needed. Retry failed Tasks once before escalating. For followed Tasks with created_by_pet=false, track and report progress, file one owner_decision for a real blocker, and leave completion or cancellation to the Owner.\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, reply NOOP; an improvement worth doing can go on the agenda or become a Task, but do not invent work to avoid NOOP, and do not re-check items that only wait on the Owner;\n4) NOOP is a valid result for a wake with nothing to do;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence. Do not copy the same body across layers."
+		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, ignored_tasks, core/agenda.md and pending approvals. Leave ignored_tasks on hold unless the Owner explicitly asks you to act, even if an older event, agenda or loop entry mentions them. Work through these in order:\n0) Before new work, pick the oldest open Task with created_by_pet=true (including Tasks you took over). Verify it before completing or cancelling it. For a real blocker, file one kind=owner_decision approval with task_id in the payload. Escalate waiting/blocked Tasks when a decision is needed. Retry failed Tasks once before escalating. For followed Tasks with created_by_pet=false, track and report progress, file one owner_decision for a real blocker, and leave completion or cancellation to the Owner.\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, reply NOOP; an improvement worth doing can go on the agenda or become a Task, but do not invent work to avoid NOOP, and do not re-check items that only wait on the Owner;\n4) NOOP is a valid result for a wake with nothing to do;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence. Do not copy the same body across layers."
 	}
-	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、ignored_tasks、core/agenda.md 和待审批项。ignored_tasks 由 owner 搁置，即使旧事件、议程或闭环记录里还提到它们，也只在 owner 明确要求时处理。按顺序处理：\n0) 做新工作前，挑出 created_by_pet=true 的任务里最早还没闭环的一个，验证后再完成或取消。遇到真实阻塞，提交一次 kind=owner_decision 审批（payload 带 task_id）。waiting/blocked 需要决定时及时升级，failed 先重试一次再升级。created_by_pet=false 的关注任务只跟踪和汇报，有真实阻塞时提交一次 owner_decision，完成或取消由 owner 决定。\n1) 有事件或待办：处理它；\n2) 需要 owner 决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：回复 NOOP；想到值得做的改进可以写进议程或建 Task，但不要为了不回 NOOP 而找事做，也不要把只等 owner 的事项再查一遍；\n4) 没有事可做时，NOOP 就是合格的结果；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
+	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、ignored_tasks、core/agenda.md 和待审批项。ignored_tasks 由 owner 搁置，即使旧事件、议程或闭环记录里还提到它们，也只在 owner 明确要求时处理。按顺序处理：\n0) 做新工作前，挑出 created_by_pet=true 的任务里最早还没闭环的一个（包括你接管的任务），验证后再完成或取消。遇到真实阻塞，提交一次 kind=owner_decision 审批（payload 带 task_id）。waiting/blocked 需要决定时及时升级，failed 先重试一次再升级。created_by_pet=false 的关注任务只跟踪和汇报，有真实阻塞时提交一次 owner_decision，完成或取消由 owner 决定。\n1) 有事件或待办：处理它；\n2) 需要 owner 决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：回复 NOOP；想到值得做的改进可以写进议程或建 Task，但不要为了不回 NOOP 而找事做，也不要把只等 owner 的事项再查一遍；\n4) 没有事可做时，NOOP 就是合格的结果；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
 }
 
 func (s *Service) petUsesEnglish(ctx context.Context) bool {
@@ -1218,7 +1222,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_overview", Description: "只读查看 AHA2 项目、任务、渠道的汇总和需要关注的任务", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、未闭环且我创建或关注的任务（open_tasks）、owner 已搁置的任务（ignored_tasks，只在 owner 明确要求时处理）、审批、未处理的知识库自动同步异常（notifications）和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（默认以 16KB 为预算，优先保留任务清单；history_truncated 表示压掉了历史）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
+		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、未闭环且我创建或关注的任务（open_tasks）、owner 已搁置的任务（ignored_tasks，只在 owner 明确要求时处理）、审批、未处理的知识库自动同步异常（notifications）和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（默认以 16KB 为预算，保留全部未闭环任务；history_truncated 表示压掉了历史，open_task_details_truncated 表示精简了关注任务的详情）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"history_limit": map[string]any{
 					"type": "integer", "minimum": 0, "maximum": 50,

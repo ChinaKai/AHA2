@@ -1084,19 +1084,33 @@ func TestPetWorkStateDefaultBudgetAndExpansion(t *testing.T) {
 	}
 }
 
-func TestPetWorkStateKeepsAllOpenTasksOverBudget(t *testing.T) {
+func TestPetWorkStateCompacts400FollowedTasksWithoutDroppingRows(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	pet := fixture.createPetDraft(t, "宠物")
 	now := fixture.createdAt
-	const taskCount = 51
+	const taskCount = 400
+	const maxCompactBytes = 96 * 1024
+	goal := strings.Repeat("关注目标<", 100)
+	lastError := strings.Repeat("最近错误<", 200)
 	for i := 0; i < taskCount; i++ {
-		id := fmt.Sprintf("task-followed-%02d", i)
+		id := fmt.Sprintf("task-followed-%03d", i)
 		task := domain.Task{
 			ID: id, ProjectID: pet.ProjectID, WorkspaceID: pet.WorkspaceID,
-			Title: strings.Repeat("x", 250), Status: domain.TaskActive,
+			Title: strings.Repeat("标题", 120), CurrentGoal: goal, Status: domain.TaskWaitingUser,
 			RuntimeConfigSnapshotID: pet.RuntimeConfigSnapshotID, CreatedAt: now, UpdatedAt: now,
 		}
 		if err := fixture.database.CreateTask(fixture.ctx, task); err != nil {
+			t.Fatal(err)
+		}
+		msg := domain.Message{ID: domain.NewID("message"), TaskID: id, Role: "user", Sender: "owner", Content: "开始", CreatedAt: now}
+		if err := fixture.database.AddMessage(fixture.ctx, msg); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.database.CreateTurn(fixture.ctx, domain.Turn{
+			ID: domain.NewID("turn"), TaskID: id, AgentID: "main", Sequence: 1,
+			InputMessageID: msg.ID, Status: domain.TurnFailed, Error: lastError,
+			RuntimeConfigSnapshotID: pet.RuntimeConfigSnapshotID, QueuedAt: now, FinishedAt: now,
+		}); err != nil {
 			t.Fatal(err)
 		}
 		if err := fixture.database.UpsertPetTaskWatch(fixture.ctx, id, "manual", now); err != nil {
@@ -1111,23 +1125,64 @@ func TestPetWorkStateKeepsAllOpenTasksOverBudget(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) <= petWorkStateDefaultBudgetBytes {
-		t.Fatalf("fixture must exceed the default budget, got %d bytes", len(raw))
+	if !state.OpenTaskDetailsTruncated || len(raw) > maxCompactBytes {
+		t.Fatalf("compact briefing size=%d bytes, want <=%d; details truncated=%t", len(raw), maxCompactBytes, state.OpenTaskDetailsTruncated)
 	}
+	expandedRaw, err := fixture.service.PetMCPTool(fixture.ctx, "aha_pet_work_state", json.RawMessage(`{"history_limit":9}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expanded PetWorkState
+	if err := json.Unmarshal([]byte(expandedRaw), &expanded); err != nil {
+		t.Fatal(err)
+	}
+	if len(expandedRaw) <= maxCompactBytes || expanded.OpenTaskDetailsTruncated || len(expanded.OpenTasks) != taskCount ||
+		expanded.OpenTasks[0].Goal == "" || expanded.OpenTasks[0].LastTurnError == "" {
+		t.Fatalf("expanded briefing size=%d bytes, rows=%d, details truncated=%t", len(expandedRaw), len(expanded.OpenTasks), expanded.OpenTaskDetailsTruncated)
+	}
+	t.Logf("briefing for %d tasks: %d bytes compact, %d bytes expanded", taskCount, len(raw), len(expandedRaw))
 	if len(state.OpenTasks) != taskCount || state.Inspection.OpenTasks != taskCount {
 		t.Fatalf("wake open rows=%d, inspection open count=%d, want %d", len(state.OpenTasks), state.Inspection.OpenTasks, taskCount)
 	}
 	for i, task := range state.OpenTasks {
-		if want := fmt.Sprintf("task-followed-%02d", i); task.ID != want || task.CreatedByPet {
-			t.Fatalf("open task %d = %+v, want followed task %s", i, task, want)
+		full := expanded.OpenTasks[i]
+		if want := fmt.Sprintf("task-followed-%03d", i); task.ID != want || task.Code == "" || task.Code != full.Code ||
+			task.Status != string(domain.TaskWaitingUser) || task.CreatedByPet || task.NeedsAttention ||
+			task.Goal != "" || task.LastTurnError != "" {
+			t.Fatalf("open task %d = %+v, want compact followed task %s", i, task, want)
 		}
 	}
 	view, err := fixture.service.PetWorkbench(fixture.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Inspection == nil || view.Inspection.OpenTasks != taskCount {
+	if view.Inspection == nil || view.Inspection.OpenTasks != taskCount ||
+		view.Inspection.AttentionTasks != 0 || state.Inspection.AttentionTasks != 0 {
 		t.Fatalf("workbench inspection=%+v, want %d open tasks", view.Inspection, taskCount)
+	}
+}
+
+func TestPetWorkStateShortensFollowedProseBeforeCompactingRows(t *testing.T) {
+	followed := PetOpenTask{
+		ID: "followed", Code: "task-1", Title: "关注任务", Status: string(domain.TaskActive),
+		Goal: strings.Repeat("关注", 120), LastTurnError: strings.Repeat("错误", 120),
+	}
+	owned := PetOpenTask{
+		ID: "owned", Code: "task-2", CreatedByPet: true, Status: string(domain.TaskFailed),
+		Goal: strings.Repeat("目标", 120), LastTurnError: strings.Repeat("错误", 120),
+	}
+	state := PetWorkState{OpenTasks: []PetOpenTask{followed, owned}}
+	want := followed
+	want.Goal = truncateAssistantText(want.Goal, 40)
+	want.LastTurnError = truncateAssistantText(want.LastTurnError, 40)
+	target := PetWorkState{OpenTasks: []PetOpenTask{want, owned}, OpenTaskDetailsTruncated: true}
+	raw, err := json.Marshal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.fitDefaultBudget(len(raw))
+	if !reflect.DeepEqual(state, target) {
+		t.Fatalf("expected followed prose to shorten and keep the title, with owned task intact: %+v", state.OpenTasks)
 	}
 }
 

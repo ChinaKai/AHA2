@@ -122,11 +122,11 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 		t.Helper()
 		state := readWorkState()
 		if len(state.IgnoredTasks) != 0 || len(state.OpenTasks) != want ||
-			state.Inspection.AttentionTasks != want || state.Inspection.OpenTasks != want {
+			state.Inspection.AttentionTasks != 0 || state.Inspection.OpenTasks != want {
 			t.Fatalf("open=%+v ignored=%+v inspection=%+v", state.OpenTasks, state.IgnoredTasks, state.Inspection)
 		}
 		if want == 1 && (state.OpenTasks[0].ID != task.ID || state.OpenTasks[0].Status != string(domain.TaskWaitingUser) ||
-			!state.OpenTasks[0].NeedsAttention) {
+			state.OpenTasks[0].NeedsAttention || state.OpenTasks[0].AttentionReason != "") {
 			t.Fatalf("owner-followed waiting task missing: %+v", state.OpenTasks)
 		}
 		response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
@@ -134,7 +134,7 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 			Inspection app.PetInspection `json:"inspection"`
 		}
 		decodeResponse(t, response, &view)
-		if response.StatusCode != http.StatusOK || view.Inspection.OpenTasks != want || view.Inspection.AttentionTasks != want {
+		if response.StatusCode != http.StatusOK || view.Inspection.OpenTasks != want || view.Inspection.AttentionTasks != 0 {
 			t.Fatalf("workbench=%d inspection=%+v, want %d open tasks", response.StatusCode, view.Inspection, want)
 		}
 	}

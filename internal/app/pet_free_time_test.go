@@ -36,6 +36,41 @@ func TestPetIdleWakeBecomesFreeTimeWithinTheDailyAllowance(t *testing.T) {
 	}
 	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
 
+	now := fixture.createdAt
+	project := domain.Project{ID: "project-free-time", Name: "巡检项目", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-free-time", ProjectID: project.ID, Name: "巡检工作区", RootPath: t.TempDir(),
+		Locality: "local", Transport: "native", Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateProject(fixture.ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.CreateWorkspace(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	create := func(title string) domain.Task {
+		t.Helper()
+		task, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: title, Request: "持续跟踪",
+			ModelID: fixture.model.ID, StartMode: "manual",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	followed := create("owner 任务")
+	from := followed.Status
+	for _, to := range []domain.TaskStatus{domain.TaskPreparing, domain.TaskActive} {
+		if err := fixture.database.UpdateTaskStatus(fixture.ctx, followed.ID, from, to, timeString(now), ""); err != nil {
+			t.Fatal(err)
+		}
+		from = to
+	}
+	if _, err := fixture.service.PetWatchTask(fixture.ctx, followed.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	wake := func(device string) string {
 		t.Helper()
 		if _, err := fixture.service.AskOwnerPetBrain(fixture.ctx, PetBrainContext{
@@ -67,9 +102,30 @@ func TestPetIdleWakeBecomesFreeTimeWithinTheDailyAllowance(t *testing.T) {
 		t.Fatalf("a work wake consumed the free-time allowance: used=%d", got)
 	}
 
-	// Only items waiting on the Owner remain: those are not work for the pet.
+	// A followed Owner Task and a waiting agenda item leave the pet free.
 	if err := fixture.service.PetUpdateCore(fixture.ctx, "agenda", "# 自主议程\n\n- waiting | 等 owner 验收 | owner 决定\n"); err != nil {
 		t.Fatal(err)
+	}
+	t.Run("pet-owned open task takes priority", func(t *testing.T) {
+		owned := create("宠物负责的任务")
+		fixture.service.recordPetWork(fixture.ctx, "task_created", owned.ID, "")
+		if prompt := wake("pet-owned-work"); strings.Contains(prompt, "自由时间") || !strings.Contains(prompt, "[自主行为]") {
+			t.Fatalf("an unfinished pet-owned task did not trigger a work wake:\n%s", prompt)
+		}
+		if got := used(); got != 0 {
+			t.Fatalf("a pet-owned task wake consumed the free-time allowance: used=%d", got)
+		}
+		if err := fixture.database.UpdateTaskStatus(fixture.ctx, owned.ID, owned.Status, domain.TaskCancelled, timeString(now), timeString(now)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	state, err := fixture.service.PetWorkState(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.OpenTasks) != 1 || state.OpenTasks[0].ID != followed.ID ||
+		state.OpenTasks[0].Status != string(domain.TaskActive) || state.OpenTasks[0].CreatedByPet {
+		t.Fatalf("expected a single followed Owner task before the free wake: %+v", state.OpenTasks)
 	}
 	first := wake("free-1")
 	if !strings.Contains(first, "[自由时间 今天第 1/2 次]") || strings.Contains(first, "[自主行为]") {

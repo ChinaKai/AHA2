@@ -309,7 +309,7 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 		inspection.Failed != 1 || inspection.Blocked != 1 || inspection.Completed != 1 {
 		t.Fatalf("task stats=%#v", inspection)
 	}
-	if inspection.OpenTasks != 5 || inspection.AttentionTasks != 2 {
+	if inspection.OpenTasks != 5 || inspection.AttentionTasks != 1 {
 		t.Fatalf("open/attention=%d/%d", inspection.OpenTasks, inspection.AttentionTasks)
 	}
 	if inspection.PendingApprovals != 2 || inspection.DegradedChannelCount != 0 || inspection.ChannelsTotal != 0 {
@@ -318,7 +318,7 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	if inspection.Channels != nil {
 		t.Fatalf("embedded snapshot should stay compact: %#v", inspection.Channels)
 	}
-	if !strings.Contains(inspection.Note, "2 个未闭环任务需要处理") {
+	if !strings.Contains(inspection.Note, "1 个未闭环任务需要宠物处理") {
 		t.Fatalf("inspection note=%q", inspection.Note)
 	}
 	state, err := fixture.service.PetWorkState(fixture.ctx)
@@ -334,6 +334,9 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	for i, item := range state.OpenTasks {
 		if item.ID != wantIDs[i] || item.Status != string(wantStatuses[i]) || item.CreatedByPet != (i < 3) {
 			t.Fatalf("open task at %d = %+v, want %s (%s), created_by_pet=%t", i, item, wantIDs[i], wantStatuses[i], i < 3)
+		}
+		if item.NeedsAttention != (item.ID == "task-attention") || (!item.CreatedByPet && item.AttentionReason != "") {
+			t.Fatalf("open task attention=%+v", item)
 		}
 	}
 	ignored := map[string]bool{}

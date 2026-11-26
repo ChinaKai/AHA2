@@ -18,10 +18,9 @@ const (
 	petWorkStateDefaultHistoryLimit = 8
 	petWorkStateMaxHistoryLimit     = 50
 	petWorkStateMaxTurnResultChars  = 20000
-	// petWorkStateDefaultBudgetBytes is a safety net for unusually large
-	// approvals: when the default view would exceed it, the oldest history
-	// rows are dropped (never inspection/open_tasks/core/loops/agenda) and
-	// notification details are shortened while their id/kind/at/status stay.
+	// petWorkStateDefaultBudgetBytes is the target for default briefings.
+	// History and optional details can shrink to meet it. Every open Task
+	// and notification keeps its identity and status.
 	petWorkStateDefaultBudgetBytes = 16 * 1024
 	// knowledgeSyncNotificationMinDetailRunes is the floor used when the
 	// default budget has to shorten notification prose. Identity and status are
@@ -63,9 +62,9 @@ type PetWorkItem struct {
 	Note           string `json:"note,omitempty"`
 }
 
-// PetOpenTask is a still-open Task the pet created or follows. CreatedByPet
-// identifies Tasks the pet is responsible for closing. The list is independent
-// of recent events so older Tasks stay visible.
+// PetOpenTask is a still-open Task the pet created, took over, or follows.
+// CreatedByPet identifies Tasks the pet is responsible for closing, including
+// Tasks created through takeover. The list is independent of recent events.
 type PetOpenTask struct {
 	ID                string `json:"id"`
 	Code              string `json:"code,omitempty"`
@@ -173,6 +172,9 @@ type PetWorkState struct {
 	// NotificationsTruncated reports that the default budget shortened some
 	// notification Detail text. Every notification keeps its id/kind/at/status.
 	NotificationsTruncated bool `json:"notifications_truncated,omitempty"`
+	// OpenTaskDetailsTruncated reports that the default budget shortened
+	// details of followed Tasks. Every row and its ID, code and status remain.
+	OpenTaskDetailsTruncated bool `json:"open_task_details_truncated,omitempty"`
 }
 
 // PetWorkStateOptions controls the size of the wake-up briefing. The zero value
@@ -401,11 +403,9 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	return state, nil
 }
 
-// fitDefaultBudget drops the oldest approval/work rows and shortens
-// notification detail until the marshaled briefing fits the default MCP result
-// budget. Fixed fields (inspection, open_tasks, ignored_tasks, core, open_loops, agenda) and
-// the notification identity/status are never removed because the pet relies on
-// them to make decisions and to acknowledge the right row.
+// fitDefaultBudget trims history and optional details. When mandatory fields
+// alone exceed the target, the full open-task list and notification references
+// still take priority.
 func (state *PetWorkState) fitDefaultBudget(limit int) {
 	data, err := json.Marshal(state)
 	if err != nil || len(data) <= limit {
@@ -456,9 +456,47 @@ func (state *PetWorkState) fitDefaultBudget(limit int) {
 		state.NotificationsTruncated = notificationsTrimmed
 	}
 	if len(state.Approvals) == fullApprovals && len(state.Work) == fullWork {
-		// No history row was dropped; only fixed fields or notification prose
-		// were trimmed, and the latter has its own flag.
 		state.HistoryTruncated = false
+	}
+	if len(data) > limit {
+		state.fitFollowedTaskDetails(limit)
+	}
+}
+
+// fitFollowedTaskDetails first shortens prose, then falls back to task
+// references for very large lists. The minimum response grows with the
+// number and encoded size of those references.
+func (state *PetWorkState) fitFollowedTaskDetails(limit int) {
+	data, err := json.Marshal(state)
+	if err != nil || len(data) <= limit {
+		return
+	}
+	for _, runes := range []int{160, 40, 0} {
+		for i := range state.OpenTasks {
+			task := &state.OpenTasks[i]
+			if task.CreatedByPet {
+				continue
+			}
+			goal := truncateAssistantText(task.Goal, runes)
+			lastError := truncateAssistantText(task.LastTurnError, runes)
+			state.OpenTaskDetailsTruncated = state.OpenTaskDetailsTruncated || goal != task.Goal || lastError != task.LastTurnError
+			task.Goal, task.LastTurnError = goal, lastError
+		}
+		if data, err := json.Marshal(state); err != nil || len(data) <= limit {
+			return
+		}
+	}
+	for i := range state.OpenTasks {
+		task := &state.OpenTasks[i]
+		if task.CreatedByPet {
+			continue
+		}
+		reference := PetOpenTask{
+			ID: task.ID, Code: task.Code, Status: task.Status, LastTurnStatus: task.LastTurnStatus,
+			PendingApprovalID: task.PendingApprovalID,
+		}
+		state.OpenTaskDetailsTruncated = state.OpenTaskDetailsTruncated || *task != reference
+		*task = reference
 	}
 }
 
@@ -527,7 +565,7 @@ func petOpenTaskCandidates(ids []string, tasks []domain.Task, watches map[string
 }
 
 func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate, pendingByTask map[string]string, opts PetWorkStateOptions, canViewTasks bool) ([]PetOpenTask, error) {
-	activeReviews, err := s.petActiveReviewLabels(ctx, tasks, canViewTasks)
+	activeReviews, err := s.petActiveReviewLabels(ctx, tasks)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +576,7 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate
 			ID: task.ID, Code: task.Code, CreatedByPet: task.createdByPet,
 			PendingApprovalID: pendingByTask[task.ID],
 		}
-		item.NeedsAttention = petOpenTaskAttentionReason(task.Status, "", "") != "" && item.PendingApprovalID == ""
+		item.NeedsAttention = task.needsAttention(item.PendingApprovalID)
 		// Keep the followed Task in the list even when its details are private.
 		if !canViewTasks && !task.createdByPet {
 			open = append(open, item)
@@ -564,13 +602,11 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate
 				item.LastTurnResult = petWorkStateTurnResult(turn.Result, opts.TurnResultChars)
 			}
 		}
-		activeReview := ""
-		if task.Status == domain.TaskWaitingUser {
-			activeReview = activeReviews[task.ID]
-		}
-		item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus), activeReview)
-		if item.AttentionReason != "" && item.PendingApprovalID != "" {
-			item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
+		if task.createdByPet {
+			item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus), activeReviews[task.ID])
+			if item.AttentionReason != "" && item.PendingApprovalID != "" {
+				item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
+			}
 		}
 		open = append(open, item)
 	}
@@ -607,10 +643,10 @@ func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string
 // flow, never from titles or prompts. A review that already stopped running is
 // not progress: only preparing/active reviews describe an implementation Task
 // as under review.
-func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []petOpenTaskCandidate, canViewTasks bool) (map[string]string, error) {
+func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []petOpenTaskCandidate) (map[string]string, error) {
 	waitingIDs := make([]string, 0, len(tasks))
 	for _, task := range tasks {
-		if task.Status == domain.TaskWaitingUser && (canViewTasks || task.createdByPet) {
+		if task.Status == domain.TaskWaitingUser && task.createdByPet {
 			waitingIDs = append(waitingIDs, task.ID)
 		}
 	}
@@ -643,6 +679,10 @@ func petCodeReviewInFlight(status domain.TaskStatus) bool {
 	return status == domain.TaskPreparing || status == domain.TaskActive
 }
 
+func (task petOpenTaskCandidate) needsAttention(pendingApprovalID string) bool {
+	return task.createdByPet && pendingApprovalID == "" && petOpenTaskAttentionReason(task.Status, "", "") != ""
+}
+
 // petOpenTaskAttentionReason describes why an open Task is listed for the
 // owner's attention. A waiting Task whose latest Turn succeeded is only
 // waiting for the next message, so it must not claim the owner has to decide
@@ -673,10 +713,7 @@ func petOpenTaskAttentionReason(status domain.TaskStatus, lastTurnStatus domain.
 // the per-task project, workspace and latest-turn lookups the full list needs.
 func petOpenTaskCounts(tasks []petOpenTaskCandidate, pendingByTask map[string]string) (open int, attention int) {
 	for _, task := range tasks {
-		// The count keeps its original meaning: every waiting_user Task without
-		// a pending approval counts, whether or not it is merely awaiting the
-		// next message. Only the displayed reason is refined.
-		if petOpenTaskAttentionReason(task.Status, "", "") != "" && pendingByTask[task.ID] == "" {
+		if task.needsAttention(pendingByTask[task.ID]) {
 			attention++
 		}
 	}
@@ -725,9 +762,9 @@ func (s *Service) petInspectionWithChannelSnapshot(now time.Time, tasks []domain
 	}
 	switch {
 	case attentionTasks > 0:
-		inspection.Note = fmt.Sprintf("有 %d 个未闭环任务需要处理；先处理最早的，真实阻塞提交一次 owner_decision 审批。", attentionTasks)
+		inspection.Note = fmt.Sprintf("有 %d 个未闭环任务需要宠物处理。遇到真实阻塞时提交一次 owner_decision 审批。", attentionTasks)
 	case openTasks > 0:
-		inspection.Note = fmt.Sprintf("有 %d 个未闭环任务；先处理最早的一个，再创建新任务。", openTasks)
+		inspection.Note = fmt.Sprintf("有 %d 个未闭环任务。", openTasks)
 	default:
 		inspection.Note = "没有未闭环任务。"
 	}
