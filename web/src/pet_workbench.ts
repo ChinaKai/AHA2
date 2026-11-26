@@ -1,5 +1,5 @@
-import type {PetApproval, PetChannelHealth, PetInspection, PetTaskWatch} from "./types.js";
-import {petApprovalKindIcon, petApprovalStatusLabel} from "./pet_approvals.js";
+import type {PetApproval, PetChannelHealth, PetDesk, PetDeskCorrection, PetDeskNeed, PetDeskRun, PetDeskWait, PetInspection, PetTaskWatch} from "./types.js";
+import {petApprovalDurationText, petApprovalKindIcon, petApprovalRiskLabel, petApprovalStatusLabel} from "./pet_approvals.js";
 import {petWatchActionKeys} from "./ui_helpers.js";
 
 export type PetApprovalKindFilter = "all" | "idea" | "decision";
@@ -522,6 +522,8 @@ export interface PetOverviewOptions {
   formatTime: FormatTime;
   statusLabel?: (status: string) => string;
   now?: number;
+  /** The desk view; absent means an older server or a failed desk read. */
+  desk?: PetDesk | null;
 }
 
 function overviewStatusLabel(status: string, options: PetOverviewOptions): string {
@@ -578,11 +580,52 @@ function overviewCard(jump: string, count: number, label: string, hint: string, 
   </button>`;
 }
 
-// renderPetOverview is the landing tab: what needs attention right now, the
-// three numerals that jump to their page, the compact follow list and the last
-// few changes. Inspection snapshots and channel-health cards live on their own
-// pages, so the overview stays short.
+// renderOverviewWatchLists renders the three collapsed follow lists shared by
+// the legacy overview and the desk: watched, ignored and (when non-empty)
+// unfollowed tasks.
+function renderOverviewWatchLists(watches: PetTaskWatch[], options: PetOverviewOptions): {watched: PetTaskWatch[]; lists: string} {
+  const translate = options.translate;
+  // Deliberately not virtualized. The 2026-11 fixture with 500 watches (200
+  // followed + 300 other/ignored) rendered 500 rows in two collapsed <details>,
+  // each row a fixed 54px. The list is static unless the owner changes a
+  // follow, so the DOM cost is bounded and paid once, unlike the conversation
+  // which streams and measures variable rows. If the server ever returns a
+  // watch list materially above 500, apply the conversation window pattern.
+  const watched = watches.filter(item => item.watched && !item.ignored);
+  const ignored = watches.filter(item => item.ignored);
+  const unfollowed = watches.filter(item => !item.watched && !item.ignored);
+  const followRows = watched.length
+    ? watched.map(item => renderWatchRow(item, options)).join("")
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyFollows"))}</div>`;
+  const followTitle = translate("petWorkbench.overviewFollows", {count: String(watched.length)});
+  const ignoredTitle = translate("petWorkbench.otherFollows", {count: String(ignored.length)});
+  const followDetails = `<details class="pet-overview-follows" id="pet-overview-follows" aria-label="${escapeHTML(followTitle)}"><summary>${escapeHTML(followTitle)}</summary><div class="pet-overview-follows-body">${followRows}</div></details>`;
+  const ignoredRows = ignored.length
+    ? ignored.map(item => renderWatchRow(item, options)).join("")
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyIgnored"))}</div>`;
+  const ignoredDetails = `<details class="pet-overview-other" id="pet-overview-ignored" aria-label="${escapeHTML(ignoredTitle)}"><summary>${escapeHTML(ignoredTitle)}</summary><div class="pet-overview-other-body">${ignoredRows}</div></details>`;
+  const unfollowedTitle = translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)});
+  const unfollowedDetails = unfollowed.length
+    ? `<details class="pet-overview-other" id="pet-overview-unfollowed" aria-label="${escapeHTML(unfollowedTitle)}"><summary>${escapeHTML(unfollowedTitle)}</summary><div class="pet-overview-other-body">${unfollowed.map(item => renderWatchRow(item, options)).join("")}</div></details>`
+    : "";
+
+  return {watched, lists: `${followDetails}
+    ${ignoredDetails}
+    ${unfollowedDetails}`};
+}
+
+// renderPetOverview is the landing tab. With a desk (task-813) it is the pet's
+// desk: what waits on the Owner, what moves without them, what runs, and the
+// pet's own side. Without one it is the pre-desk overview: three numerals that
+// jump to their page, the compact follow list and the last few changes.
 export function renderPetOverview(options: PetOverviewOptions): string {
+  if (options.desk && typeof options.desk === "object") return renderPetDesk(options.desk, options);
+  return renderLegacyPetOverview(options);
+}
+
+// renderLegacyPetOverview is the pre-desk overview, kept for servers that do
+// not return `desk` and for a desk read that failed on the server.
+function renderLegacyPetOverview(options: PetOverviewOptions): string {
   const translate = options.translate;
   const inspection = options.inspection;
   const approvals = options.approvals || [];
@@ -612,29 +655,7 @@ export function renderPetOverview(options: PetOverviewOptions): string {
   const checkedAt = textValue(inspection?.checked_at);
   if (checkedAt) meta.push(`${translate("petWorkbench.inspectionCheckedAt")}: ${escapeHTML(options.formatTime(checkedAt))}`);
 
-  // Deliberately not virtualized. The 2026-11 fixture with 500 watches (200
-  // followed + 300 other/ignored) rendered 500 rows in two collapsed <details>,
-  // each row a fixed 54px. The list is static unless the owner changes a
-  // follow, so the DOM cost is bounded and paid once, unlike the conversation
-  // which streams and measures variable rows. If the server ever returns a
-  // watch list materially above 500, apply the conversation window pattern.
-  const watched = watches.filter(item => item.watched && !item.ignored);
-  const ignored = watches.filter(item => item.ignored);
-  const unfollowed = watches.filter(item => !item.watched && !item.ignored);
-  const followRows = watched.length
-    ? watched.map(item => renderWatchRow(item, options)).join("")
-    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyFollows"))}</div>`;
-  const followTitle = translate("petWorkbench.overviewFollows", {count: String(watched.length)});
-  const ignoredTitle = translate("petWorkbench.otherFollows", {count: String(ignored.length)});
-  const followDetails = `<details class="pet-overview-follows" id="pet-overview-follows" aria-label="${escapeHTML(followTitle)}"><summary>${escapeHTML(followTitle)}</summary><div class="pet-overview-follows-body">${followRows}</div></details>`;
-  const ignoredRows = ignored.length
-    ? ignored.map(item => renderWatchRow(item, options)).join("")
-    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyIgnored"))}</div>`;
-  const ignoredDetails = `<details class="pet-overview-other" id="pet-overview-ignored" aria-label="${escapeHTML(ignoredTitle)}"><summary>${escapeHTML(ignoredTitle)}</summary><div class="pet-overview-other-body">${ignoredRows}</div></details>`;
-  const unfollowedTitle = translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)});
-  const unfollowedDetails = unfollowed.length
-    ? `<details class="pet-overview-other" id="pet-overview-unfollowed" aria-label="${escapeHTML(unfollowedTitle)}"><summary>${escapeHTML(unfollowedTitle)}</summary><div class="pet-overview-other-body">${unfollowed.map(item => renderWatchRow(item, options)).join("")}</div></details>`
-    : "";
+  const {watched, lists: watchLists} = renderOverviewWatchLists(watches, options);
 
   const activities: Array<{time: string; html: string}> = [];
   for (const item of approvals) {
@@ -668,13 +689,349 @@ export function renderPetOverview(options: PetOverviewOptions): string {
       ${overviewCard("follows", anomalies, translate("petWorkbench.overviewAnomalies"), translate("petWorkbench.overviewAnomaliesHint"), anomalies ? "attention" : "")}
       ${overviewCard("channels", degraded, translate("petWorkbench.overviewChannels"), translate("petWorkbench.overviewChannelsHint", {total: String(channelTotal)}), degraded ? "attention" : "")}
     </div>
-    ${followDetails}
-    ${ignoredDetails}
-    ${unfollowedDetails}
+    ${watchLists}
     <section class="pet-overview-recent">
       <h3>${escapeHTML(translate("petWorkbench.overviewRecent"))}</h3>
       <div class="pet-overview-activity-list">${recent}</div>
     </section>
+  </div>`;
+}
+
+/* Pet desk (task-813): the overview grouped by who has to move ------------- */
+
+// Circled numerals cover the 50-row needs_owner bound: ①–⑳ U+2460, ㉑–㉟
+// U+3251, ㊱–㊿ U+32B1. Anything past that (a future bigger bound) falls back
+// to a plain number instead of an unrelated glyph.
+export function petDeskIndexLabel(position: number): string {
+  const value = Math.trunc(position);
+  if (value >= 1 && value <= 20) return String.fromCodePoint(0x2460 + value - 1);
+  if (value >= 21 && value <= 35) return String.fromCodePoint(0x3251 + value - 21);
+  if (value >= 36 && value <= 50) return String.fromCodePoint(0x32b1 + value - 36);
+  return `(${value})`;
+}
+
+// petDeskElapsedMinutes is how long an item has waited or run. The server
+// sends Go's zero time ("0001-01-01T00:00:00Z") when it has no timestamp, so
+// anything at or before the Unix epoch is unknown rather than "2000 years". A
+// timestamp slightly ahead of the browser clock counts as zero.
+export function petDeskElapsedMinutes(since: unknown, now: number): number | null {
+  if (typeof since !== "string" || !since.trim()) return null;
+  const start = Date.parse(since);
+  if (!Number.isFinite(start) || start <= 0 || !Number.isFinite(now)) return null;
+  return Math.max(0, Math.floor((now - start) / 60_000));
+}
+
+// petDeskElapsedText renders the elapsed time with `key` ("waited" or "ran"),
+// or "" when the timestamp is unknown so the row shows no duration at all.
+export function petDeskElapsedText(since: unknown, now: number, key: string, translate: Translate): string {
+  const minutes = petDeskElapsedMinutes(since, now);
+  if (minutes === null) return "";
+  return translate(key, {duration: petApprovalDurationText(minutes, translate)});
+}
+
+function deskTotal(total: unknown, shown: number): number {
+  const value = countValue(total);
+  return value === null ? shown : Math.max(value, shown);
+}
+
+function deskList<T>(value: unknown): T[] {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === "object") as T[] : [];
+}
+
+function deskStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(textValue).filter(Boolean) : [];
+}
+
+// Server text is user content (titles, questions, notes). It is escaped and
+// marked data-i18n-ignore so the English UI pass never rewrites it.
+function deskText(value: string, tag = "span", className = ""): string {
+  return `<${tag}${className ? ` class="${className}"` : ""} data-i18n-ignore>${escapeHTML(value)}</${tag}>`;
+}
+
+function deskTruncated(total: number, shown: number, translate: Translate): string {
+  if (total <= shown) return "";
+  return `<div class="field-help pet-desk-more">${escapeHTML(translate("petWorkbench.desk.notShown", {count: String(total - shown)}))}</div>`;
+}
+
+// The kinds below are the desk API contract (internal/app/pet_desk.go). A kind
+// this page does not know yet gets the generic label of its list instead of an
+// empty cell or a raw catalog key.
+const PET_DESK_KINDS: Record<string, readonly string[]> = {
+  need: ["approval", "question", "blocked", "failed", "stopped"],
+  later: ["idea", "next_step"],
+  wait: ["review", "executing", "channel"],
+};
+
+export function petDeskKnownKind(list: "need" | "later" | "wait", kind: unknown): boolean {
+  return typeof kind === "string" && PET_DESK_KINDS[list].includes(kind);
+}
+
+function deskKindLabel(list: "need" | "later", kind: string, translate: Translate, values: Record<string, string> = {}): string {
+  const key = petDeskKnownKind(list, kind) ? kind : "other";
+  return translate(`petWorkbench.desk.${list}.${key}`, values);
+}
+
+// Kinds become a class name; anything outside the contract's alphabet is
+// "other" so a server value can never add arbitrary classes.
+function deskKindClass(kind: string): string {
+  return /^[a-z_]+$/.test(kind) ? kind : "other";
+}
+
+function deskTaskLabel(item: {task_code?: string; task_id?: string}): string {
+  return textValue(item.task_code) || textValue(item.task_id);
+}
+
+// deskTitleHTML is the row title: the server title, else the task code, else
+// a translated placeholder (UI text, so it is not marked data-i18n-ignore).
+function deskTitleHTML(item: {title?: string; task_code?: string; task_id?: string}, translate: Translate): string {
+  const title = textValue(item.title) || deskTaskLabel(item);
+  return title ? deskText(title) : escapeHTML(translate("petWorkbench.desk.untitled"));
+}
+
+// deskHeadlineHTML leads with the task code when it adds something, so a
+// review or running row reads "task-805 · title".
+function deskHeadlineHTML(item: {title?: string; task_code?: string; task_id?: string}, translate: Translate): string {
+  const code = deskTaskLabel(item);
+  const title = textValue(item.title);
+  if (code && title && code !== title) return `${deskText(code)} · ${deskText(title)}`;
+  return deskTitleHTML(item, translate);
+}
+
+function deskOpenTaskButton(taskID: string, translate: Translate): string {
+  return `<button type="button" data-pet-overview-task="${escapeHTML(taskID)}">${escapeHTML(translate("petWorkbench.desk.openTask"))}</button>`;
+}
+
+// A needs/later row: the main button opens the approval detail for approvals
+// and ideas, otherwise the Task. Approvals tied to a Task also get an explicit
+// open-task button. There is deliberately no approve/reject on the desk: a
+// delete approval must not be one click away from a one-line summary.
+function renderDeskNeed(item: PetDeskNeed, position: number | null, options: PetOverviewOptions, now: number): string {
+  const translate = options.translate;
+  const kind = textValue(item.kind);
+  const approvalID = textValue(item.approval_id);
+  const taskID = textValue(item.task_id);
+  const isApproval = (kind === "approval" || kind === "idea") && approvalID !== "";
+  const questions = deskStrings(item.questions);
+  const list = position === null ? "later" : "need";
+  const kindLabel = deskKindLabel(list, kind, translate, {count: String(questions.length)});
+  const meta: string[] = [escapeHTML(kindLabel)];
+  const taskLabel = deskTaskLabel(item);
+  if (taskLabel && textValue(item.title) !== taskLabel) meta.push(deskText(taskLabel));
+  if (kind === "approval" && textValue(item.risk)) meta.push(escapeHTML(petApprovalRiskLabel(String(item.risk), translate)));
+  const waited = petDeskElapsedText(item.since, now, "petWorkbench.desk.waited", translate);
+  if (waited) meta.push(escapeHTML(waited));
+  const target = isApproval
+    ? `data-pet-approval-open="${escapeHTML(approvalID)}"`
+    : taskID ? `data-pet-overview-task="${escapeHTML(taskID)}"` : "";
+  const head = `<strong>${deskTitleHTML(item, translate)}</strong><small>${meta.join(" · ")}</small>`;
+  const main = target
+    ? `<button type="button" class="pet-desk-item-main" ${target}>${head}</button>`
+    : `<div class="pet-desk-item-main">${head}</div>`;
+  const detail = textValue(item.detail);
+  let body = "";
+  if (kind === "question" && questions.length) {
+    body = `<ul class="pet-desk-questions">${questions.map(question => deskText(question, "li")).join("")}</ul>`;
+  } else if (detail) {
+    const label = kind === "next_step" ? `${escapeHTML(translate("petWorkbench.desk.nextStep"))}` : "";
+    body = `<p class="pet-desk-detail">${label}${deskText(detail)}</p>`;
+  }
+  const actions: string[] = [];
+  if (isApproval) actions.push(`<button type="button" data-pet-approval-open="${escapeHTML(approvalID)}">${escapeHTML(translate("petWorkbench.desk.review"))}</button>`);
+  if (taskID) actions.push(deskOpenTaskButton(taskID, translate));
+  const index = position === null ? "" : `<span class="pet-desk-index" aria-hidden="true">${petDeskIndexLabel(position)}</span>`;
+  return `<li class="pet-desk-item kind-${deskKindClass(kind)}">
+    ${index}
+    <div class="pet-desk-item-body">${main}${body}</div>
+    ${actions.length ? `<div class="pet-desk-item-actions">${actions.join("")}</div>` : ""}
+  </li>`;
+}
+
+function renderDeskWait(item: PetDeskWait, options: PetOverviewOptions, now: number): string {
+  const translate = options.translate;
+  const kind = textValue(item.kind);
+  const taskID = textValue(item.task_id);
+  const on = textValue(item.on);
+  const count = countValue(item.count) ?? 0;
+  const meta: string[] = [];
+  let headline: string;
+  let target = taskID ? `data-pet-overview-task="${escapeHTML(taskID)}"` : "";
+  if (kind === "review") {
+    headline = deskHeadlineHTML(item, translate);
+    meta.push(escapeHTML(translate("petWorkbench.desk.wait.review")) + (on ? ` → ${deskText(on)}` : ""));
+  } else if (kind === "executing") {
+    headline = deskTitleHTML(item, translate);
+    meta.push(escapeHTML(translate("petWorkbench.desk.wait.executing")));
+    const taskLabel = deskTaskLabel(item);
+    if (taskLabel) meta.push(deskText(taskLabel));
+  } else if (kind === "channel") {
+    headline = deskTitleHTML(item, translate);
+    meta.push(escapeHTML(translate("petWorkbench.desk.wait.channel", {count: String(count)})));
+    // Channel rows jump to the channel cards; their `on` is the channel id.
+    target = `data-pet-overview-jump="channels"`;
+  } else {
+    // Unknown wait kind: keep the row readable with the generic label.
+    headline = deskTitleHTML(item, translate);
+    meta.push(escapeHTML(translate("petWorkbench.desk.wait.other")));
+  }
+  const waited = petDeskElapsedText(item.since, now, kind === "channel" ? "petWorkbench.desk.oldestWaited" : "petWorkbench.desk.waited", translate);
+  if (waited) meta.push(escapeHTML(waited));
+  const head = `<strong>${headline}</strong><small>${meta.join(" · ")}</small>`;
+  const main = target
+    ? `<button type="button" class="pet-desk-item-main" ${target}>${head}</button>`
+    : `<div class="pet-desk-item-main">${head}</div>`;
+  return `<li class="pet-desk-item kind-${deskKindClass(kind)}"><div class="pet-desk-item-body">${main}</div></li>`;
+}
+
+function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: number): string {
+  const translate = options.translate;
+  const taskID = textValue(item.task_id);
+  const meta: string[] = [];
+  const status = textValue(item.status);
+  if (status) meta.push(escapeHTML(overviewStatusLabel(status, options)));
+  const ran = petDeskElapsedText(item.since, now, "petWorkbench.desk.ran", translate);
+  if (ran) meta.push(escapeHTML(ran));
+  const head = `<strong>${deskHeadlineHTML(item, translate)}</strong><small>${meta.join(" · ")}</small>`;
+  const main = taskID
+    ? `<button type="button" class="pet-desk-item-main" data-pet-overview-task="${escapeHTML(taskID)}">${head}</button>`
+    : `<div class="pet-desk-item-main">${head}</div>`;
+  const detail = textValue(item.detail);
+  const hardware = deskStrings(item.hardware);
+  const lines = [
+    detail ? `<p class="pet-desk-detail">${deskText(detail)}</p>` : "",
+    hardware.length ? `<p class="pet-desk-hardware">${escapeHTML(translate("petWorkbench.desk.hardware"))}${hardware.map(name => deskText(name)).join(", ")}</p>` : "",
+  ].join("");
+  return `<li class="pet-desk-item kind-running"><div class="pet-desk-item-body">${main}${lines}</div></li>`;
+}
+
+function renderDeskSection(id: string, className: string, title: string, rows: string[], total: number, empty: string, translate: Translate, extra = ""): string {
+  const list = rows.length
+    ? `<ol class="pet-desk-list">${rows.join("")}</ol>${deskTruncated(total, rows.length, translate)}`
+    : `<div class="field-help pet-desk-empty">${escapeHTML(empty)}</div>`;
+  return `<section class="pet-desk-section ${className}" id="${id}" aria-label="${escapeHTML(title)}">
+    <header><h3>${escapeHTML(title)}</h3></header>
+    ${list}
+    ${extra}
+  </section>`;
+}
+
+function renderDeskStatus(desk: PetDesk, options: PetOverviewOptions, totals: {needs: number; waiting: number; running: number}): string {
+  const translate = options.translate;
+  const inspection = options.inspection;
+  const health = textValue(inspection?.health);
+  const healthLabel = health === "ok"
+    ? translate("petWorkbench.inspectionHealthy")
+    : health === "degraded"
+      ? translate("petWorkbench.inspectionDegraded")
+      : translate("petWorkbench.inspectionUnknown");
+  const healthClass = health === "ok" ? "ok" : health === "degraded" ? "degraded" : "unknown";
+  // Version and uptime are rarely needed on the desk; they move to the hover
+  // hint of the status row.
+  const hint: string[] = [];
+  const version = textValue(inspection?.version);
+  const webVersion = textValue(inspection?.web_version);
+  if (version) hint.push(`${translate("petWorkbench.inspectionVersion")}: ${version}`);
+  if (webVersion) hint.push(`${translate("petWorkbench.inspectionWebVersion")}: ${webVersion}`);
+  const uptime = countValue(inspection?.uptime_minutes);
+  if (uptime !== null) hint.push(`${translate("petWorkbench.inspectionUptime")}: ${uptimeText(uptime, translate)}`);
+  const counts = [
+    translate("petWorkbench.desk.statusNeeds", {count: String(totals.needs)}),
+    translate("petWorkbench.desk.statusWaiting", {count: String(totals.waiting)}),
+    translate("petWorkbench.desk.statusRunning", {count: String(totals.running)}),
+  ];
+  const degraded = (options.channels || []).filter(item => item.degraded).length;
+  const channelAlert = degraded > 0
+    ? `<button type="button" class="pet-desk-channel-alert" data-pet-overview-jump="channels">${escapeHTML(translate("petWorkbench.desk.statusChannels", {count: String(degraded)}))}</button>`
+    : "";
+  const checkedAt = textValue(inspection?.checked_at);
+  const checked = checkedAt
+    ? `<small class="pet-desk-checked">${escapeHTML(translate("petWorkbench.desk.checkedAt", {time: options.formatTime(checkedAt)}))}</small>`
+    : "";
+  return `<section class="pet-desk-status"${hint.length ? ` title="${escapeHTML(hint.join(" · "))}"` : ""}>
+    <strong>${escapeHTML(translate("petWorkbench.overviewStatusTitle"))}</strong>
+    <span class="pet-inspection-health ${healthClass}">${escapeHTML(healthLabel)}</span>
+    <span class="pet-desk-status-counts">${counts.map(text => `<span>${escapeHTML(text)}</span>`).join("")}</span>
+    ${channelAlert}
+    ${checked}
+  </section>`;
+}
+
+function renderDeskPetSide(desk: PetDesk, translate: Translate): string {
+  const corrections = deskList<PetDeskCorrection>(desk.corrections).filter(item => textValue(item.owner_note));
+  const loops = deskStrings(desk.open_loops);
+  const agenda = deskStrings(desk.agenda);
+  const loopsTotal = deskTotal(desk.open_loops_total, loops.length);
+  const agendaTotal = deskTotal(desk.agenda_total, agenda.length);
+  const title = translate("petWorkbench.desk.petSide");
+  const correctionTitle = translate("petWorkbench.desk.corrections", {count: String(corrections.length)});
+  const correctionBody = corrections.length
+    ? `<ul class="pet-desk-ledger">${corrections.map(item => `<li><strong>${deskTitleHTML(item, translate)}</strong><span class="pet-desk-quote">${deskText(textValue(item.owner_note))}</span></li>`).join("")}</ul>`
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.desk.emptyCorrections"))}</div>`;
+  const ledger = (key: string, items: string[], total: number): string => `<div class="pet-desk-ledger-group">
+      <h4>${escapeHTML(translate(key, {count: String(total)}))}</h4>
+      ${items.length ? `<ul class="pet-desk-ledger">${items.map(item => deskText(item, "li")).join("")}</ul>${deskTruncated(total, items.length, translate)}` : ""}
+    </div>`;
+  const header = `<header><h3>${escapeHTML(title)}</h3><button type="button" data-pet-overview-jump="records">${escapeHTML(translate("petWorkbench.desk.toRecords"))}</button></header>`;
+  if (!corrections.length && loopsTotal === 0 && agendaTotal === 0) {
+    return `<section class="pet-desk-section pet-desk-pet" id="pet-desk-pet" aria-label="${escapeHTML(title)}">
+    ${header}
+    <div class="field-help pet-desk-empty">${escapeHTML(translate("petWorkbench.desk.emptyPetSide"))}</div>
+  </section>`;
+  }
+  return `<section class="pet-desk-section pet-desk-pet" id="pet-desk-pet" aria-label="${escapeHTML(title)}">
+    ${header}
+    <div class="pet-desk-ledger-group"><h4>${escapeHTML(correctionTitle)}</h4>${correctionBody}</div>
+    ${ledger("petWorkbench.desk.openLoops", loops, loopsTotal)}
+    ${ledger("petWorkbench.desk.agenda", agenda, agendaTotal)}
+  </section>`;
+}
+
+// renderPetDesk keeps the server's order in every list: the server already
+// sorts needs_owner longest-wait first and later newest first, and it chose
+// which rows survive truncation by that order. Counts come from the
+// untruncated *_total fields.
+function renderPetDesk(desk: PetDesk, options: PetOverviewOptions): string {
+  const translate = options.translate;
+  const now = typeof options.now === "number" && Number.isFinite(options.now) ? options.now : Date.now();
+  const needs = deskList<PetDeskNeed>(desk.needs_owner);
+  const later = deskList<PetDeskNeed>(desk.later);
+  const waiting = deskList<PetDeskWait>(desk.waiting_others);
+  const running = deskList<PetDeskRun>(desk.running);
+  const totals = {
+    needs: deskTotal(desk.needs_owner_total, needs.length),
+    later: deskTotal(desk.later_total, later.length),
+    waiting: deskTotal(desk.waiting_others_total, waiting.length),
+    running: deskTotal(desk.running_total, running.length),
+  };
+  const laterTitle = translate("petWorkbench.desk.laterTitle", {count: String(totals.later)});
+  const laterBody = later.length
+    ? `<ol class="pet-desk-list">${later.map(item => renderDeskNeed(item, null, options, now)).join("")}</ol>${deskTruncated(totals.later, later.length, translate)}`
+    : `<div class="field-help pet-desk-empty">${escapeHTML(translate("petWorkbench.desk.emptyLater"))}</div>`;
+  const laterDetails = `<details class="pet-desk-later" id="pet-desk-later"><summary>${escapeHTML(laterTitle)}</summary>${laterBody}</details>`;
+  const needsSection = renderDeskSection(
+    "pet-desk-needs", "pet-desk-needs",
+    translate("petWorkbench.desk.needsTitle", {count: String(totals.needs)}),
+    needs.map((item, index) => renderDeskNeed(item, index + 1, options, now)),
+    totals.needs, translate("petWorkbench.desk.emptyNeeds"), translate, laterDetails,
+  );
+  const waitingSection = renderDeskSection(
+    "pet-desk-waiting", "pet-desk-waiting",
+    translate("petWorkbench.desk.waitingTitle", {count: String(totals.waiting)}),
+    waiting.map(item => renderDeskWait(item, options, now)),
+    totals.waiting, translate("petWorkbench.desk.emptyWaiting"), translate,
+  );
+  const runningSection = renderDeskSection(
+    "pet-desk-running", "pet-desk-running",
+    translate("petWorkbench.desk.runningTitle", {count: String(totals.running)}),
+    running.map(item => renderDeskRun(item, options, now)),
+    totals.running, translate("petWorkbench.desk.emptyRunning"), translate,
+  );
+  const {lists} = renderOverviewWatchLists(options.watches || [], options);
+  return `<div class="pet-overview pet-desk">
+    ${renderDeskStatus(desk, options, totals)}
+    ${needsSection}
+    <div class="pet-desk-pair">${waitingSection}${runningSection}</div>
+    ${renderDeskPetSide(desk, translate)}
+    <div class="pet-desk-follows">${lists}</div>
   </div>`;
 }
 

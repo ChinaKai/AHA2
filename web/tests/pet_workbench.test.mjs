@@ -1238,3 +1238,301 @@ test("records use a collapsible left contents column that survives tab switches"
   assert.match(loader, /tocOpen \? "" : " toc-collapsed"/);
   assert.match(loader, /aria-expanded="\$\{tocOpen\}"/);
 });
+
+/* Pet desk overview (task-813, design doc section 10) --------------------- */
+
+const deskCatalog = async locale => {
+  const i18n = await import("../build/i18n.js");
+  i18n.applyLocale(locale);
+  return i18n;
+};
+const deskNow = Date.parse("2026-11-26T02:00:00Z");
+const deskFixture = () => ({
+  needs_owner: [
+    {kind: "blocked", task_id: "t-790", task_code: "task-790", title: "Needs a permission", detail: "missing <permission>", since: "2026-11-26T00:30:00Z"},
+    {kind: "approval", approval_id: "a-801", approval_kind: "owner_decision", risk: "high", task_id: "t-801", task_code: "task-801", title: "Merge task-801?", detail: "pet summary", since: "2026-11-26T01:00:00Z"},
+    {kind: "question", task_id: "t-813", task_code: "task-813", title: "Desk plan", questions: ["Step one only?", "Plan or build?"], since: "2026-11-26T01:15:00Z"},
+    {kind: "failed", task_id: "t-1", task_code: "task-1", title: "Failed task", since: "2026-11-26T01:20:00Z"},
+    {kind: "stopped", task_id: "t-2", task_code: "task-2", title: "Stopped task", since: "0001-01-01T00:00:00Z"},
+  ],
+  needs_owner_total: 7,
+  later: [
+    {kind: "idea", approval_id: "idea-1", title: "Tidy channel contacts", since: "2026-11-26T01:50:00Z"},
+    {kind: "next_step", task_id: "t-3", task_code: "task-3", title: "Done round", detail: "Wait for review notes", since: "2026-11-25T23:00:00Z"},
+  ],
+  later_total: 12,
+  waiting_others: [
+    {kind: "review", task_id: "t-805", task_code: "task-805", title: "Reviewed work", on: "task-806", since: "2026-11-26T01:15:00Z"},
+    {kind: "executing", title: "Delete workspace X", on: "delete_workspace", since: "2026-11-26T01:58:00Z"},
+    {kind: "channel", title: "Feishu group A", on: "c-1", count: 3, since: "2026-11-26T01:56:00Z"},
+  ],
+  waiting_others_total: 3,
+  running: [
+    {task_id: "t-811", task_code: "task-811", title: "Overnight comparison", status: "active", turn_status: "running", detail: "comparing builds", hardware: ["Debug board 1"], since: "2026-11-26T01:48:00Z"},
+    {task_id: "t-812", task_code: "task-812", title: "Preparing task", status: "preparing", since: "bad-time"},
+  ],
+  running_total: 4,
+  corrections: [{at: "2026-11-25T00:00:00Z", approval_id: "a-9", kind: "delete_workspace", title: "Delete workspace X", owner_note: "Keep it for comparison"}],
+  open_loops: ["loop one", "loop two", "loop three"],
+  open_loops_total: 5,
+  agenda: ["agenda one", "agenda two"],
+  agenda_total: 3,
+});
+const deskOptions = (i18n, desk, extra = {}) => ({
+  desk,
+  inspection: {health: "ok", version: "1.2.3", uptime_minutes: 90, checked_at: "2026-11-26T01:40:00Z"},
+  watches: [
+    {task_id: "t-w", code: "task-9", title: "Watched", status: "active", watched: true, ignored: false, reason: "manual", created_at: "2026-11-25T00:00:00Z", updated_at: "2026-11-25T00:00:00Z"},
+    {task_id: "t-i", code: "task-10", title: "Ignored", status: "waiting_user", watched: false, ignored: true, reason: "ignored", created_at: "2026-11-25T00:00:00Z", updated_at: "2026-11-25T00:00:00Z"},
+    {task_id: "t-u", code: "task-11", title: "Unfollowed", status: "waiting_user", watched: false, ignored: false, reason: "manual", created_at: "2026-11-25T00:00:00Z", updated_at: "2026-11-25T00:00:00Z"},
+  ],
+  channels: [],
+  translate: i18n.t,
+  formatTime: value => `at ${value}`,
+  now: deskNow,
+  ...extra,
+});
+const section = (html, id) => html.match(new RegExp(`<section [^>]*id="${id}"[\\s\\S]*?</section>`))?.[0] ?? "";
+
+test("desk elapsed time is a pure function that hides unknown timestamps", async () => {
+  const {petDeskElapsedMinutes, petDeskElapsedText} = await import("../build/pet_workbench.js");
+  assert.equal(petDeskElapsedMinutes("2026-11-26T00:30:00Z", deskNow), 90);
+  assert.equal(petDeskElapsedMinutes("2026-11-26T02:05:00Z", deskNow), 0, "a clock ahead of the browser is zero, not negative");
+  for (const bad of ["0001-01-01T00:00:00Z", "1970-01-01T00:00:00Z", "", "  ", "not a time", null, undefined, 42]) {
+    assert.equal(petDeskElapsedMinutes(bad, deskNow), null, String(bad));
+  }
+  const i18n = await deskCatalog("zh-CN");
+  assert.equal(petDeskElapsedText("2026-11-26T00:30:00Z", deskNow, "petWorkbench.desk.waited", i18n.t), "等了 1 小时 30 分钟");
+  assert.equal(petDeskElapsedText("2026-11-24T00:00:00Z", deskNow, "petWorkbench.desk.ran", i18n.t), "已跑 2 天 2 小时");
+  assert.equal(petDeskElapsedText("0001-01-01T00:00:00Z", deskNow, "petWorkbench.desk.waited", i18n.t), "");
+});
+
+test("desk circled numerals start at one and fall back past fifty", async () => {
+  const {petDeskIndexLabel} = await import("../build/pet_workbench.js");
+  assert.deepEqual([1, 2, 20, 21, 35, 36, 50].map(petDeskIndexLabel), ["①", "②", "⑳", "㉑", "㉟", "㊱", "㊿"]);
+  assert.equal(petDeskIndexLabel(51), "(51)");
+});
+
+test("desk status row uses the *_total counts and flags degraded channels", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const desk = deskFixture();
+  let html = renderPetOverview(deskOptions(i18n, desk));
+  const status = html.match(/<section class="pet-desk-status"[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.match(status, /pet-inspection-health ok">正常/);
+  assert.match(status, /7 件要你定/, "needs count comes from needs_owner_total, not the 5 rows");
+  assert.match(status, /3 件等别人/);
+  assert.match(status, /4 个在跑/, "running count comes from running_total, not the 2 rows");
+  assert.match(status, /巡检 at 2026-11-26T01:40:00Z/);
+  assert.match(status, /title="版本: 1\.2\.3 · 运行时长: 1 小时 30 分钟"/, "version and uptime move to the hover hint");
+  assert.doesNotMatch(status, /data-pet-overview-jump="channels"/, "no channel marker without degraded channels");
+  html = renderPetOverview(deskOptions(i18n, desk, {channels: [overviewChannel, {...overviewChannel, id: "c-2", degraded: false}]}));
+  assert.match(html, /<button type="button" class="pet-desk-channel-alert" data-pet-overview-jump="channels">1 个渠道异常<\/button>/);
+});
+
+test("desk needs list keeps the server order, numbers from ① and labels every kind", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const needs = section(html, "pet-desk-needs");
+  assert.match(needs, /<h3>要你定（7）<\/h3>/);
+  const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)">\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
+  assert.deepEqual(order, ["①blocked", "②approval", "③question", "④failed", "⑤stopped"], "rows keep the response order");
+  assert.match(needs, /被阻塞 · <span data-i18n-ignore>task-790<\/span> · 等了 1 小时 30 分钟/);
+  assert.match(needs, /审批 · <span data-i18n-ignore>task-801<\/span> · 高风险 · 等了 1 小时 0 分钟/);
+  assert.match(needs, /有 2 个问题等你 · <span data-i18n-ignore>task-813<\/span> · 等了 45 分钟/);
+  assert.match(needs, /<ul class="pet-desk-questions"><li data-i18n-ignore>Step one only\?<\/li><li data-i18n-ignore>Plan or build\?<\/li><\/ul>/);
+  assert.match(needs, /失败 · <span data-i18n-ignore>task-1<\/span> · 等了 40 分钟/);
+  // A zero `since` shows no duration at all instead of "739,000 days".
+  assert.match(needs, /上一轮没跑完 · <span data-i18n-ignore>task-2<\/span><\/small>/);
+  assert.match(needs, /<div class="field-help pet-desk-more">还有 2 条未显示<\/div>/, "truncation uses needs_owner_total");
+});
+
+test("desk rows open tasks and approval details, never resolve approvals", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const needs = section(html, "pet-desk-needs");
+  assert.match(needs, /class="pet-desk-item-main" data-pet-overview-task="t-790"/);
+  assert.match(needs, /class="pet-desk-item-main" data-pet-approval-open="a-801"/, "an approval opens its detail");
+  assert.match(needs, /<button type="button" data-pet-approval-open="a-801">去处理<\/button><button type="button" data-pet-overview-task="t-801">打开任务<\/button>/);
+  assert.match(needs, /data-pet-overview-task="t-813"/);
+  const later = html.match(/<details class="pet-desk-later"[\s\S]*?<\/details>/)?.[0] ?? "";
+  assert.match(later, /data-pet-approval-open="idea-1"/, "an idea opens the approval detail");
+  assert.match(later, /data-pet-overview-task="t-3"/);
+  assert.doesNotMatch(html, /data-pet-approval-decision|data-pet-approval-resolve/, "the desk has no approve or reject button");
+  assert.match(section(html, "pet-desk-waiting"), /data-pet-overview-jump="channels"/, "a channel row jumps to the channel cards");
+  assert.match(section(html, "pet-desk-running"), /data-pet-overview-task="t-811"/);
+  assert.match(section(html, "pet-desk-pet"), /data-pet-overview-jump="records"/);
+});
+
+test("desk later list folds by default with its total and keeps its order", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const later = html.match(/<details class="pet-desk-later"[^>]*>[\s\S]*?<\/details>/)?.[0] ?? "";
+  assert.match(later, /^<details class="pet-desk-later" id="pet-desk-later"><summary>不急的还有 12 件<\/summary>/, "collapsed, titled with later_total");
+  assert.ok(later.indexOf("idea-1") < later.indexOf("t-3"), "server order");
+  assert.match(later, /宠物的想法 · 等了 10 分钟/);
+  assert.match(later, /等你下一句话 · <span data-i18n-ignore>task-3<\/span>/);
+  assert.match(later, /<p class="pet-desk-detail">下一步：<span data-i18n-ignore>Wait for review notes<\/span><\/p>/);
+  assert.doesNotMatch(later, /pet-desk-index/, "later rows are not numbered");
+  assert.match(later, /还有 10 条未显示/);
+});
+
+test("desk waiting and running columns label every kind and show elapsed time and hardware", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const waiting = section(html, "pet-desk-waiting");
+  assert.match(waiting, /<h3>等别人（3）<\/h3>/);
+  assert.match(waiting, /<strong><span data-i18n-ignore>task-805<\/span> · <span data-i18n-ignore>Reviewed work<\/span><\/strong><small>评审中 → <span data-i18n-ignore>task-806<\/span> · 等了 45 分钟/);
+  assert.match(waiting, /<small>审批执行中 · 等了 2 分钟<\/small>/);
+  assert.match(waiting, /Feishu group A<\/span><\/strong><small>3 条待发 · 最早一条等了 4 分钟<\/small>/);
+  assert.doesNotMatch(waiting, /pet-desk-more/, "not truncated when the total equals the rows");
+  const running = section(html, "pet-desk-running");
+  assert.match(running, /<h3>在跑什么（4）<\/h3>/);
+  assert.match(running, /task-811<\/span> · <span data-i18n-ignore>Overnight comparison<\/span><\/strong><small>[^<]* · 已跑 12 分钟<\/small>/);
+  assert.match(running, /<p class="pet-desk-detail"><span data-i18n-ignore>comparing builds<\/span><\/p>/);
+  assert.match(running, /<p class="pet-desk-hardware">硬件：<span data-i18n-ignore>Debug board 1<\/span><\/p>/);
+  const preparing = running.match(/data-pet-overview-task="t-812">[\s\S]*?<\/small>/)?.[0] ?? "";
+  assert.match(preparing, /Preparing task/);
+  assert.doesNotMatch(preparing, /已跑/, "an invalid since shows no duration");
+  assert.match(running, /还有 2 条未显示/);
+});
+
+test("desk pet side lists corrections, loops and agenda with totals", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const pet = section(html, "pet-desk-pet");
+  assert.match(pet, /<h4>你最近的纠正（1）<\/h4><ul class="pet-desk-ledger"><li><strong><span data-i18n-ignore>Delete workspace X<\/span><\/strong><span class="pet-desk-quote"><span data-i18n-ignore>Keep it for comparison<\/span><\/span><\/li><\/ul>/);
+  assert.match(pet, /<h4>未闭环 5 条<\/h4>[\s\S]*loop three[\s\S]*还有 2 条未显示/);
+  assert.match(pet, /<h4>议程 3 条<\/h4>[\s\S]*agenda two[\s\S]*还有 1 条未显示/);
+  assert.match(pet, /<button type="button" data-pet-overview-jump="records">到记录页看全部<\/button>/);
+});
+
+test("desk layout replaces the cards and recent activity but keeps the follow lists", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetOverview(deskOptions(i18n, deskFixture()));
+  const order = ["pet-desk-status", "pet-desk-needs", "pet-desk-pair", "pet-desk-waiting", "pet-desk-running", "pet-desk-pet", "pet-overview-follows", "pet-overview-ignored", "pet-overview-unfollowed"]
+    .map(marker => html.indexOf(marker));
+  assert.ok(order.every(index => index >= 0), `every block renders: ${order}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "top-to-bottom order");
+  assert.doesNotMatch(html, /pet-overview-cards|pet-overview-card\b|pet-overview-recent|pet-overview-activity/);
+  assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（1）<\/summary>/);
+  assert.match(html, /data-pet-watch-ignore="false" data-pet-watch-task="t-i"/, "follow actions are unchanged");
+});
+
+test("every empty desk block says so, and an empty needs list says nothing waits on the owner", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const empty = {needs_owner: [], needs_owner_total: 0, later: [], later_total: 0, waiting_others: [], waiting_others_total: 0, running: [], running_total: 0, corrections: [], open_loops: [], open_loops_total: 0, agenda: [], agenda_total: 0};
+  const html = renderPetOverview(deskOptions(i18n, empty));
+  assert.match(section(html, "pet-desk-needs"), /<div class="field-help pet-desk-empty">现在没有事等你定。<\/div>/);
+  assert.match(html, /<summary>不急的还有 0 件<\/summary><div class="field-help pet-desk-empty">没有不急的事。<\/div>/);
+  assert.match(section(html, "pet-desk-waiting"), /没有在等别人的事。/);
+  assert.match(section(html, "pet-desk-running"), /现在没有任务在跑。/);
+  assert.match(section(html, "pet-desk-pet"), /宠物这边没有未闭环的事。/);
+  // Sparse or partial payloads (older field sets) must not throw or print undefined.
+  const sparse = renderPetOverview(deskOptions(i18n, {needs_owner: [{kind: "question", title: "x"}]}));
+  assert.doesNotMatch(sparse, /undefined|NaN/);
+  assert.match(sparse, /要你定（1）/);
+});
+
+test("unknown desk kinds and missing fields fall back to readable labels", async () => {
+  const i18n = await deskCatalog("en-US");
+  try {
+    const desk = {
+      needs_owner: [{kind: "brand_new", title: "", since: ""}, {title: "No kind"}],
+      needs_owner_total: 2,
+      later: [{kind: "mystery", title: "Later thing", since: ""}],
+      later_total: 1,
+      waiting_others: [{kind: "elsewhere", title: "", since: ""}],
+      waiting_others_total: 1,
+      running: [{task_id: "t-r", title: "", status: "", since: ""}],
+      running_total: 1,
+      corrections: [{title: "", owner_note: "note"}],
+      open_loops: [], open_loops_total: 0, agenda: [], agenda_total: 0,
+    };
+    const html = renderPetOverview(deskOptions(i18n, desk));
+    assert.doesNotMatch(html, /undefined|null|NaN|petWorkbench\.desk\./, "no raw keys or undefined");
+    assert.match(html, /<li class="pet-desk-item kind-brand_new">[\s\S]*?<strong>\(untitled\)<\/strong><small>Needs you<\/small>/);
+    assert.match(html, /<li class="pet-desk-item kind-other">[\s\S]*?No kind<\/span><\/strong><small>Needs you<\/small>/);
+    assert.match(html, /Later thing<\/span><\/strong><small>Can wait<\/small>/);
+    assert.match(html, /<strong>\(untitled\)<\/strong><small>In progress<\/small>/);
+    assert.match(html, /data-pet-overview-task="t-r"><strong><span data-i18n-ignore>t-r<\/span><\/strong>/, "a running row without title falls back to the task id");
+    assert.match(html, /<li><strong>\(untitled\)<\/strong><span class="pet-desk-quote"><span data-i18n-ignore>note<\/span>/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});
+
+test("desk escapes every server string", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const evil = `<img src=x onerror="alert(1)">&'`;
+  const escaped = "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;&#039;";
+  const desk = {
+    needs_owner: [
+      {kind: "approval", approval_id: `a"><script>`, risk: evil, task_id: `t"><b>`, task_code: evil, title: evil, detail: evil, since: ""},
+      {kind: "question", task_id: "t", title: "q", questions: [evil], since: ""},
+    ],
+    needs_owner_total: 2,
+    later: [{kind: evil, title: evil, detail: evil, since: ""}], later_total: 1,
+    waiting_others: [{kind: "review", task_id: evil, task_code: evil, title: evil, on: evil, since: ""}, {kind: "channel", title: evil, on: evil, count: 1, since: ""}],
+    waiting_others_total: 2,
+    running: [{task_id: evil, task_code: evil, title: evil, status: evil, detail: evil, hardware: [evil], since: ""}], running_total: 1,
+    corrections: [{title: evil, owner_note: evil}],
+    open_loops: [evil], open_loops_total: 1, agenda: [evil], agenda_total: 1,
+  };
+  const html = renderPetOverview(deskOptions(i18n, desk));
+  assert.doesNotMatch(html, /<img|<script|<b>|onerror="/);
+  assert.ok(html.split(escaped).length - 1 >= 12, "server strings are escaped in every block");
+  assert.match(html, /data-pet-approval-open="a&quot;&gt;&lt;script&gt;"/);
+  assert.match(html, /class="pet-desk-item kind-other"/, "an unexpected kind cannot inject a class");
+});
+
+test("without a desk the overview falls back to the pre-desk layout", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  for (const desk of [undefined, null]) {
+    const html = renderPetOverview({...deskOptions(i18n, desk), approvals: [{id: "a-1", title: "Delete", status: "pending", kind: "delete_task", created_at: "2026-11-26T00:00:00Z"}]});
+    assert.match(html, /class="pet-overview-cards"/);
+    assert.match(html, /class="pet-overview-recent"/);
+    assert.match(html, /data-pet-approval-open="a-1"/);
+    assert.doesNotMatch(html, /pet-desk/);
+  }
+});
+
+test("the English desk has no Chinese interface copy", async () => {
+  const i18n = await deskCatalog("en-US");
+  try {
+    const html = renderPetOverview(deskOptions(i18n, deskFixture(), {channels: [overviewChannel]}));
+    // Server content is marked data-i18n-ignore; drop it, then no CJK may remain.
+    const chrome = html.replace(/<(\w+)[^>]*data-i18n-ignore[^>]*>[\s\S]*?<\/\1>/g, "");
+    assert.doesNotMatch(chrome, /[一-鿿]/, chrome.match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
+    assert.match(html, /For you \(7\)/);
+    assert.match(html, /<summary>12 more that can wait<\/summary>/);
+    assert.match(html, /Questions for you: 2/);
+    assert.match(html, /waited 1 h 30 min/);
+    assert.match(html, /running for 12 min/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});
+
+test("every desk catalog key exists in both locales", async () => {
+  const source = await readFile(resolve(root, "web/src/i18n.ts"), "utf8");
+  const [zhBlock, enBlock] = [source.slice(0, source.indexOf("const enUS")), source.slice(source.indexOf("const enUS"), source.indexOf("const legacyEnglish"))];
+  const keys = block => new Set([...block.matchAll(/"(petWorkbench\.desk\.[^"]+)":/g)].map(match => match[1]));
+  const zh = keys(zhBlock);
+  const en = keys(enBlock);
+  assert.ok(zh.size >= 40, `desk keys: ${zh.size}`);
+  assert.deepEqual([...zh].sort(), [...en].sort());
+  const renderer = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  for (const [, key] of renderer.matchAll(/"(petWorkbench\.desk\.[A-Za-z_.]+)"/g)) assert.ok(zh.has(key), `missing catalog key ${key}`);
+  for (const list of ["need", "later"]) for (const kind of ["other", ...(list === "need" ? ["approval", "question", "blocked", "failed", "stopped"] : ["idea", "next_step"])]) {
+    assert.ok(zh.has(`petWorkbench.desk.${list}.${kind}`), `${list}.${kind}`);
+  }
+});
+
+test("the workbench passes the desk and a fresh clock to the overview", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  assert.match(main, /desk: view\.desk,\n\s*now: Date\.now\(\),/);
+  assert.match(main, /jump === "records"/);
+  assert.match(main, /openOverviewApproval\(button\.dataset\.petApprovalOpen \|\| ""\)/);
+  const types = await readFile(resolve(root, "web/src/types.ts"), "utf8");
+  assert.match(types, /desk\?: PetDesk;/);
+});
