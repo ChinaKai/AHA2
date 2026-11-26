@@ -214,7 +214,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 
 .app-shell { --sidebar-width: 228px; display: grid; grid-template-columns: var(--sidebar-width) 8px minmax(0,1fr); min-height: 100vh; }
 .sidebar { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; padding: 22px 14px max(16px,env(safe-area-inset-bottom)); overflow-y: auto; background: var(--color-nav); color: var(--color-nav-text); }
-.app-shell:not(.task-shell) .sidebar > :not(.sidebar-memo) { flex-shrink: 0; }
+.app-shell:not(.task-shell, .rail-shell) .sidebar > :not(.sidebar-memo) { flex-shrink: 0; }
 .sidebar nav { display: grid; gap: 5px; margin-top: 30px; }
 .sidebar nav button { justify-content: flex-start; border: 0; background: transparent; color: var(--color-nav-muted); }
 .sidebar nav button:hover:not(:disabled) { border-color: transparent; background: var(--color-nav-active); color: var(--color-nav-text); }
@@ -283,12 +283,12 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
    CSS-only visibility preserves the locally saved text, colour and fold state.
    Scope this to the full sidebar; the Task detail icon rail has its own layout. */
 @media (min-width: 761px) and (max-height: 799px) {
-  .app-shell:not(.task-shell) .sidebar { padding-top: 16px; padding-bottom: max(12px,env(safe-area-inset-bottom)); }
-  .app-shell:not(.task-shell) .sidebar nav { margin-top: 12px; gap: 3px; }
-  .app-shell:not(.task-shell) .command-palette-trigger { margin-top: 12px; }
-  .app-shell:not(.task-shell) .sidebar-memo { display: none; }
-  .app-shell:not(.task-shell) .system-meta { padding-block: 8px; }
-  .app-shell:not(.task-shell) .owner-block { padding-top: 10px; }
+  .app-shell:not(.task-shell, .rail-shell) .sidebar { padding-top: 16px; padding-bottom: max(12px,env(safe-area-inset-bottom)); }
+  .app-shell:not(.task-shell, .rail-shell) .sidebar nav { margin-top: 12px; gap: 3px; }
+  .app-shell:not(.task-shell, .rail-shell) .command-palette-trigger { margin-top: 12px; }
+  .app-shell:not(.task-shell, .rail-shell) .sidebar-memo { display: none; }
+  .app-shell:not(.task-shell, .rail-shell) .system-meta { padding-block: 8px; }
+  .app-shell:not(.task-shell, .rail-shell) .owner-block { padding-top: 10px; }
 }
 .avatar { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--color-accent-soft); color: var(--color-accent-ink); font-weight: 800; }
 .workspace { grid-column: 3; min-width: 0; }
@@ -640,22 +640,24 @@ td small { margin-top: 3px; color: var(--muted); }
 .app-shell.task-shell { --task-band-width: 272px; grid-template-columns: 64px var(--task-band-width) minmax(0,1fr); }
 .app-shell.task-shell.task-band-collapsed { --task-band-width: 48px; }
 .app-shell.task-shell.task-band-overlay { --task-band-width: 0px; }
-.app-shell.task-shell .sidebar { padding: 18px 8px 14px; overflow: hidden; }
-.app-shell.task-shell .sidebar .brand-lockup { justify-content: center; }
-.app-shell.task-shell .sidebar .brand-lockup > div,
-.app-shell.task-shell .command-palette-trigger > span,
-.app-shell.task-shell .command-palette-trigger kbd,
-.app-shell.task-shell .sidebar nav button > span:not(.task-tool-badge),
-.app-shell.task-shell .sidebar-memo,
-.app-shell.task-shell .system-meta,
-.app-shell.task-shell .owner-block > div:not(.owner-actions) { display: none; }
-.app-shell.task-shell .command-palette-trigger { justify-content: center; gap: 0; width: 48px; margin: 22px auto 0; padding: 0; }
-.app-shell.task-shell .sidebar nav { margin-top: 18px; }
-.app-shell.task-shell .sidebar nav button { justify-content: center; width: 48px; min-height: 40px; margin: 0 auto; padding: 0; }
-.app-shell.task-shell .sidebar nav button .icon { width: 18px; height: 18px; }
-.app-shell.task-shell .owner-block { display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 14px; }
-.app-shell.task-shell .owner-actions { flex-direction: column; }
-.app-shell.task-shell .workspace { min-width: 0; }
+/* The pet workbench uses the same icon rail without the task band. */
+.app-shell.rail-shell { grid-template-columns: 64px minmax(0,1fr); }
+.app-shell:is(.task-shell, .rail-shell) .sidebar { padding: 18px 8px 14px; overflow: hidden; }
+.app-shell:is(.task-shell, .rail-shell) .sidebar .brand-lockup { justify-content: center; }
+.app-shell:is(.task-shell, .rail-shell) .sidebar .brand-lockup > div,
+.app-shell:is(.task-shell, .rail-shell) .command-palette-trigger > span,
+.app-shell:is(.task-shell, .rail-shell) .command-palette-trigger kbd,
+.app-shell:is(.task-shell, .rail-shell) .sidebar nav button > span:not(.task-tool-badge),
+.app-shell:is(.task-shell, .rail-shell) .sidebar-memo,
+.app-shell:is(.task-shell, .rail-shell) .system-meta,
+.app-shell:is(.task-shell, .rail-shell) .owner-block > div:not(.owner-actions) { display: none; }
+.app-shell:is(.task-shell, .rail-shell) .command-palette-trigger { justify-content: center; gap: 0; width: 48px; margin: 22px auto 0; padding: 0; }
+.app-shell:is(.task-shell, .rail-shell) .sidebar nav { margin-top: 18px; }
+.app-shell:is(.task-shell, .rail-shell) .sidebar nav button { justify-content: center; width: 48px; min-height: 40px; margin: 0 auto; padding: 0; }
+.app-shell:is(.task-shell, .rail-shell) .sidebar nav button .icon { width: 18px; height: 18px; }
+.app-shell:is(.task-shell, .rail-shell) .owner-block { display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 14px; }
+.app-shell:is(.task-shell, .rail-shell) .owner-actions { flex-direction: column; }
+.app-shell:is(.task-shell, .rail-shell) .workspace { min-width: 0; }
 .task-band { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100vh; overflow: hidden; border-right: 1px solid var(--line); background: var(--color-surface); color: var(--color-text); }
 .task-band-head { display: flex; align-items: flex-start; gap: 8px; padding: 20px 12px 12px 14px; border-bottom: 1px solid var(--line); }
 .task-band-head > div { flex: 1; min-width: 0; }

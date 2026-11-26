@@ -733,6 +733,70 @@ try {
   assert.equal(await failPage.locator("#pet-workbench-body .pet-desk").count(), 1, "the desk stays on screen");
   await failPage.close();
 
+  // Round 4, item 6: entering the workbench folds the sidebar to the icon
+  // rail (no task band); leaving restores the full sidebar with the width the
+  // owner dragged and the notes' state. Phones keep the bottom navigation.
+  const railPage = await browser.newPage({viewport: {width: 1440, height: 900}, locale: "en-US"});
+  railPage.on("pageerror", error => errors.push(error.message));
+  await railPage.addInitScript(() => {
+    if (!sessionStorage.getItem("rail-seeded")) {
+      localStorage.setItem("aha2.sidebar-layout", JSON.stringify({width: 300, memoCollapsed: true, memoColor: "graphite"}));
+      sessionStorage.setItem("rail-seeded", "1");
+    }
+  });
+  await railPage.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await railPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  const shellState = () => railPage.evaluate(() => {
+    const shell = document.querySelector(".app-shell");
+    const sidebar = document.querySelector(".sidebar");
+    const visible = el => Boolean(el) && getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0;
+    const pet = document.querySelector('.sidebar [data-view="pet-workbench"]');
+    return {
+      rail: shell.classList.contains("rail-shell"), task: shell.classList.contains("task-shell"),
+      width: Math.round(sidebar.getBoundingClientRect().width), resizer: Boolean(document.querySelector("#sidebar-resizer")),
+      band: Boolean(document.querySelector(".task-band")), memo: visible(document.querySelector(".sidebar-memo")),
+      memoCollapsed: document.querySelector(".sidebar-memo")?.classList.contains("collapsed") ?? null,
+      petActive: pet?.classList.contains("active"), petBadge: pet?.querySelector(".task-tool-badge")?.textContent ?? "", petTitle: pet?.getAttribute("title") || "",
+      labels: [...document.querySelectorAll(".sidebar nav button > span:not(.task-tool-badge)")].some(visible),
+    };
+  });
+  let rail = await shellState();
+  assert.deepEqual([rail.rail, rail.task, rail.width, rail.resizer, rail.band, rail.memo, rail.labels], [true, false, 64, false, false, false, false], `the workbench shows the icon rail: ${JSON.stringify(rail)}`);
+  assert.equal(rail.petActive, true, "the pet entry stays selected");
+  assert.equal(rail.petBadge, "2", "the pending badge stays");
+  assert.match(rail.petTitle, /2 pending approvals \(Alt\+P\)/);
+  await railPage.locator('.sidebar [data-view="projects"]').click();
+  await railPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  rail = await shellState();
+  assert.deepEqual([rail.rail, rail.width, rail.resizer, rail.labels, rail.memoCollapsed], [false, 300, true, true, true], `leaving restores the sidebar width and notes state: ${JSON.stringify(rail)}`);
+  await railPage.locator('.sidebar [data-view="pet-workbench"]').click();
+  await railPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 15000});
+  assert.equal((await shellState()).width, 64);
+  // Phone: the bottom navigation, no rail.
+  await railPage.setViewportSize({width: 390, height: 844});
+  assert.equal(await railPage.locator(".bottom-nav").isVisible(), true);
+  assert.equal(await railPage.locator(".sidebar").isVisible(), false);
+  assert.equal(await railPage.locator('.bottom-nav [data-view="pet-workbench"].active').count(), 1);
+  await railPage.close();
+  // The board with the rail at four viewports: no page scroll, block headers
+  // in view. The content cap stays 1600px (wide enough for three columns at
+  // 1920; the rail freed 164px, which widens the board at 1440 and below).
+  const boardPage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  for (const [width, height] of [[1920, 912], [1440, 900], [1366, 768], [1100, 640]]) {
+    await boardPage.setViewportSize({width, height});
+    await boardPage.goto(`${url}/?desk=large&watches=huge`, {waitUntil: "domcontentloaded"});
+    await boardPage.waitForSelector("#pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+    const m = await boardPage.evaluate(() => {
+      const workspace = document.querySelector(".workspace");
+      return {doc: document.documentElement.scrollHeight - innerHeight, workspace: workspace.scrollHeight - workspace.clientHeight, sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        rail: Math.round(document.querySelector(".sidebar").getBoundingClientRect().width), page: Math.round(document.querySelector(".pet-workbench-page").getBoundingClientRect().width)};
+    });
+    assert.ok(m.doc <= 0 && m.workspace <= 0 && m.sideways <= 0, `${width}x${height} with the rail does not scroll: ${JSON.stringify(m)}`);
+    assert.equal(m.rail, 64);
+    assert.equal(m.page, Math.min(1600, width - 64), `${width}x${height}: the board uses the freed width up to the 1600px cap`);
+  }
+  await boardPage.close();
+
   // Step three, items 9-11: the records tab.
   await openOverview(page);
   await page.click('[data-pet-workbench-tab="records"]');

@@ -4411,7 +4411,7 @@ function navButton(view: View, glyph: string, label: Parameters<typeof t>[0]): s
   return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}"${shortcut}>${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
 }
 
-function shell(content: string, options: {taskShell?: boolean; taskBand?: string} = {}): string {
+function shell(content: string, options: {taskShell?: boolean; taskBand?: string; railShell?: boolean} = {}): string {
   const nav = [
     ["projects", "projects", "nav.projects"],
     ["tasks", "tasks", "nav.tasks"],
@@ -4425,10 +4425,14 @@ function shell(content: string, options: {taskShell?: boolean; taskBand?: string
   // The Task detail shell fixes the sidebar to its icon rail and inserts the
   // task band between nav and workspace. Every other page keeps the existing
   // resizable sidebar.
+  // The pet workbench folds the sidebar to the same icon rail without the
+  // band, so its board gets the width. The saved sidebar width and the notes'
+  // state are left untouched and come back on every other page.
   const taskShell = options.taskShell === true;
+  const railShell = !taskShell && options.railShell === true;
   const bandExpanded = taskShell && taskBandExpanded();
   const bandOverlay = taskShell && taskBandNarrow() && state.taskBandNarrowOpen;
-  const shellClass = `app-shell${taskShell ? " task-shell" : ""}${taskShell && !bandExpanded ? " task-band-collapsed" : ""}${bandOverlay ? " task-band-overlay" : ""}`;
+  const shellClass = `app-shell${taskShell ? " task-shell" : ""}${railShell ? " rail-shell" : ""}${taskShell && !bandExpanded ? " task-band-collapsed" : ""}${bandOverlay ? " task-band-overlay" : ""}`;
   return `<div class="${shellClass}">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
@@ -4442,7 +4446,7 @@ function shell(content: string, options: {taskShell?: boolean; taskBand?: string
       <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.web_version || state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
       <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>${t("owner.signedIn")}</small></div><div class="owner-actions"><button id="advanced-settings" class="icon-button" type="button" data-view="advanced" title="${t("owner.advanced")}" aria-label="${t("owner.advanced")}">${icon("settings")}</button><button id="logout" class="icon-button" title="${t("owner.logout")}">${icon("logout")}</button></div></div>
     </aside>
-    ${taskShell ? "" : `<div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>`}
+    ${taskShell || railShell ? "" : `<div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>`}
     ${taskShell ? (options.taskBand || "") : ""}
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
@@ -7553,7 +7557,7 @@ function render(): void {
       other: otherSettingsView,
       mcp: mcpView,
       "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
-      "pet-workbench": () => shell(petWorkbenchView()),
+      "pet-workbench": () => shell(petWorkbenchView(), {railShell: true}),
     };
     content = views[state.view]();
   }

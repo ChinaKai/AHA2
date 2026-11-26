@@ -3363,7 +3363,7 @@ test("sidebar pages are not duplicated as advanced settings entries", async () =
   const cards = [...main.matchAll(/<article class="panel advanced-tool-card">[^\n]*?data-view="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(cards.sort(), ["data", "mcp", "other", "prompts", "proxy", "sync"]);
   assert.match(main, /resources: \(\) => shell\(renderResourcesPage\(\{/);
-  assert.match(main, /"pet-workbench": \(\) => shell\(petWorkbenchView\(\)\)/);
+  assert.match(main, /"pet-workbench": \(\) => shell\(petWorkbenchView\(\), \{railShell: true\}\)/);
   assert.doesNotMatch(main, /(?:hardware|"pet-workbench"): \(\) => advancedSubview/);
 });
 
@@ -4046,6 +4046,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   //   live overview refresh (timing, place keeping and the elapsed tick are
   //   in the chunk; main.ts keeps the event, visibility and focus hooks):
   //   229,615 JS + 58,223 CSS = 287,838.
+  //   icon-rail sidebar on the workbench: 229,645 JS + 58,250 CSS = 287,895.
   const FIRST_SCREEN_GZIP_BUDGET = 288000;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
