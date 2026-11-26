@@ -602,6 +602,7 @@ desk
 - `stuck_on=other`：进 `waiting_others`，kind 是 `line`。
 - `stuck_on=none`：按状态卡判断，和 `unknown` 一样——状态卡有等 owner 决定的事进 `needs_owner`（kind 是 `question`，不带 `lines`），否则进 `later`。分线全部闭环、状态卡有下一步、没有等 owner 决定的事，并且满足 12.5 其余条件的进 `stalled`；还留着自己暂停或受阻的线的不进 `stalled`，那是任务写明了的等待理由。
 - `stuck_on=unknown`：和现在一样（有问题进 `needs_owner`，否则进 `later`）；另外满足“状态卡有下一步、没有等 owner 决定的事”和 12.5 其余条件的进 `stalled`。
+- 只凭状态卡判断出来的停着（`unknown`，以及分线全部闭环的 `none`）有 7 天的期限：最近一轮结束超过 7 天的不进 `stalled`，照旧进 `later`。评审时加的，owner 还没确认：这类任务唯一的依据是状态卡上留着一条下一步，而凡是带着下一步搁下的老任务都符合，不设期限的话上线当天宠物会去催一批几周没动过的任务。写明了自己有一条进行中的线（`stuck_on=self`）的任务不受这个期限限制。
 - 最近一轮主 Agent Turn 不是正常结束的（中断、失败），除了 `stuck_on=owner` 以外都不按分线分类，照原规则进 `needs_owner`（kind 是 `stopped`，状态卡有问题时是 `question`）：分线是这一轮出事之前写的，owner 需要先知道它没跑完。
 - 有未处理审批、有在跑的评审、被忽略的任务，规则和现在一样，优先于上面各条。
 

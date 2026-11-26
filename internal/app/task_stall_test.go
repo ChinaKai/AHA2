@@ -480,3 +480,40 @@ func TestTaskLifecycleClosingEventAndTurnSummary(t *testing.T) {
 		t.Fatalf("line events = %d", lineEvents)
 	}
 }
+
+func TestPetDeskCardOnlyStallExpiresButAnOpenLineDoesNot(t *testing.T) {
+	f := newPetDeskFixture(t)
+	week := 7 * 24 * time.Hour
+	newTask := func(id string, idle time.Duration, patches ...domain.TaskLinePatch) domain.Task {
+		task := f.task(id, domain.TaskWaitingUser, idle)
+		f.lifecycleTurn(task, "main", domain.TurnSucceeded, f.now.Add(-idle))
+		f.card(task.ID, "", []string{"next " + id}, nil, f.now.Add(-idle))
+		if len(patches) != 0 {
+			f.lines(task, patches...)
+		}
+		return task
+	}
+	inside := newTask("card-week", week)
+	dormant := newTask("card-dormant", week+time.Nanosecond)
+	closedDormant := newTask("closed-dormant", 30*24*time.Hour, stallPatch("done", "self", "open", ""))
+	f.lines(closedDormant, stallPatch("done", "self", "closed", ""))
+	named := newTask("line-old", 30*24*time.Hour, stallPatch("go", "self", "open", ""))
+
+	desk := f.desk()
+	var stalled []string
+	for _, row := range desk.Stalled {
+		stalled = append(stalled, row.TaskID)
+	}
+	if !slices.Equal(stalled, []string{named.ID, inside.ID}) {
+		t.Fatalf("stalled = %v, want the old task with an open line and the card-only task inside the window", stalled)
+	}
+	later := map[string]PetDeskNeed{}
+	for _, row := range desk.Later {
+		later[row.TaskID] = row
+	}
+	for _, id := range []string{dormant.ID, closedDormant.ID} {
+		if later[id].Kind != PetDeskLaterNextStep {
+			t.Fatalf("a dormant card-only task waits for the next message: %s = %+v", id, later[id])
+		}
+	}
+}

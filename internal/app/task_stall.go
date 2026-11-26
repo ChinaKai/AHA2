@@ -19,6 +19,13 @@ const (
 	// The workbench design gives a finished Turn 15 minutes before surfacing
 	// it for a nudge. Exactly 15 minutes is still inside that grace period.
 	taskStallGrace = 15 * time.Minute
+
+	// Without an open line of its own, the only sign that a Task could go on
+	// is a next step left on its state card, and every Task that was ever
+	// parked with one has that. Past this window such a Task is dormant, not
+	// stalled: listing it would have the pet nudge work nobody has touched in
+	// weeks. A Task that names an open line of its own is listed however old.
+	taskStallCardWindow = 7 * 24 * time.Hour
 )
 
 type taskLineWait struct {
@@ -82,7 +89,7 @@ func taskStall(task domain.Task, card store.TaskStateCard, wait taskLineWait, tu
 	// wait and never counts.
 	case wait.on == taskStuckUnknown, wait.on == taskStuckNone && wait.unclosed == 0:
 		detail = truncateAssistantText(petDeskFirst(card.NextSteps), petDeskDetailRunes)
-		if detail == "" || len(petDeskQuestions(card.OpenQuestions)) > 0 {
+		if detail == "" || len(petDeskQuestions(card.OpenQuestions)) > 0 || now.Sub(turn.FinishedAt) > taskStallCardWindow {
 			return PetDeskStalledTask{}, false
 		}
 	default:
