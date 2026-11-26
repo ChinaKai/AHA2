@@ -446,37 +446,37 @@ func (c *runtimeClient) recordMedia(ctx context.Context, item delivery, attachme
 	}, &map[string]any{})
 }
 
-func (c *runtimeClient) sendAttachmentDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
+func (c *runtimeClient) sendAttachmentDelivery(ctx context.Context, client *lark.Client, item delivery) (deliverySendResult, error) {
 	operationCtx, cancel := context.WithTimeout(ctx, 80*time.Second)
 	defer cancel()
 	if err := c.recordMedia(operationCtx, item, "", "", ""); err != nil {
-		return "", "", mediaStageError("record", err)
+		return deliverySendResult{}, mediaStageError("record", err)
 	}
 	kind, key := stringValue(item.SemanticPayload, "provider_resource_type"), stringValue(item.SemanticPayload, "provider_resource_key")
 	if key == "" {
 		request, err := http.NewRequestWithContext(operationCtx, http.MethodGet, c.baseURL+"/api/channel-runtime/v1/deliveries/"+item.ID+"/attachment", nil)
 		if err != nil {
-			return "", "", err
+			return deliverySendResult{}, err
 		}
 		request.Header.Set("Authorization", "Bearer "+c.token)
 		request.Header.Set("X-AHA-Lease-ID", item.LeaseID)
 		response, err := c.http.Do(request)
 		if err != nil {
-			return "", "", mediaStageError("read", err)
+			return deliverySendResult{}, mediaStageError("read", err)
 		}
 		defer response.Body.Close()
 		if response.StatusCode != http.StatusOK {
-			return "", "", mediaStageError("read", runtimeStatusError(response.StatusCode))
+			return deliverySendResult{}, mediaStageError("read", runtimeStatusError(response.StatusCode))
 		}
 		if response.ContentLength > maxMediaFileBytes {
-			return "", "", errMediaSize
+			return deliverySendResult{}, errMediaSize
 		}
 		content, err := io.ReadAll(io.LimitReader(response.Body, maxMediaFileBytes+1))
 		if err != nil {
-			return "", "", mediaStageError("read", err)
+			return deliverySendResult{}, mediaStageError("read", err)
 		}
 		if len(content) == 0 || int64(len(content)) > maxMediaFileBytes {
-			return "", "", errMediaSize
+			return deliverySendResult{}, errMediaSize
 		}
 		kind = "file"
 		if supportedImage(http.DetectContentType(content)) && int64(len(content)) <= maxMediaImageBytes {
@@ -486,10 +486,10 @@ func (c *runtimeClient) sendAttachmentDelivery(ctx context.Context, client *lark
 			request := larkim.NewCreateImageReqBuilder().Body(larkim.NewCreateImageReqBodyBuilder().ImageType("message").Image(bytes.NewReader(content)).Build()).Build()
 			response, err := client.Im.V1.Image.Create(operationCtx, request)
 			if err != nil {
-				return "", "", mediaStageError("upload_image", err)
+				return deliverySendResult{}, mediaStageError("upload_image", err)
 			}
 			if !response.Success() || response.Data == nil || response.Data.ImageKey == nil {
-				return "", "", mediaProviderError("upload_image", response.StatusCode, response.Code)
+				return deliverySendResult{}, mediaProviderError("upload_image", response.StatusCode, response.Code)
 			}
 			key = *response.Data.ImageKey
 		} else {
@@ -500,23 +500,23 @@ func (c *runtimeClient) sendAttachmentDelivery(ctx context.Context, client *lark
 			request := larkim.NewCreateFileReqBuilder().Body(larkim.NewCreateFileReqBodyBuilder().FileType("stream").FileName(name).File(bytes.NewReader(content)).Build()).Build()
 			response, err := client.Im.V1.File.Create(operationCtx, request)
 			if err != nil {
-				return "", "", mediaStageError("upload_file", err)
+				return deliverySendResult{}, mediaStageError("upload_file", err)
 			}
 			if !response.Success() || response.Data == nil || response.Data.FileKey == nil {
-				return "", "", mediaProviderError("upload_file", response.StatusCode, response.Code)
+				return deliverySendResult{}, mediaProviderError("upload_file", response.StatusCode, response.Code)
 			}
 			key = *response.Data.FileKey
 		}
 		if key == "" {
-			return "", "", fmt.Errorf("media_upload_failed")
+			return deliverySendResult{}, fmt.Errorf("media_upload_failed")
 		}
 		if err := c.recordMedia(operationCtx, item, "", kind, key); err != nil {
-			return "", "", mediaStageError("record", err)
+			return deliverySendResult{}, mediaStageError("record", err)
 		}
 	}
 	item.SemanticPayload = map[string]any{"kind": "provider_media", "resource_type": kind, "resource_key": key}
-	messageID, requestID, err := sendDelivery(operationCtx, client, item)
-	return messageID, requestID, mediaStageError("send", err)
+	sent, err := sendDelivery(operationCtx, client, item)
+	return sent, mediaStageError("send", err)
 }
 
 func deliveryImageItems(payload map[string]any) []map[string]any {
@@ -581,7 +581,7 @@ func (c *runtimeClient) uploadDeliveryImage(ctx context.Context, client *lark.Cl
 	return key, nil
 }
 
-func (c *runtimeClient) sendOutreachImageDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
+func (c *runtimeClient) sendOutreachImageDelivery(ctx context.Context, client *lark.Client, item delivery) (deliverySendResult, error) {
 	operationCtx, cancel := context.WithTimeout(ctx, 80*time.Second)
 	defer cancel()
 	images := deliveryImageItems(item.SemanticPayload)
@@ -590,22 +590,22 @@ func (c *runtimeClient) sendOutreachImageDelivery(ctx context.Context, client *l
 	for _, image := range images {
 		attachmentID := stringValue(image, "attachment_id")
 		if attachmentID == "" {
-			return "", "", mediaStageError("read", errors.New("missing attachment id"))
+			return deliverySendResult{}, mediaStageError("read", errors.New("missing attachment id"))
 		}
 		key := keys[attachmentID]
 		if key == "" {
 			var err error
 			key, err = c.uploadDeliveryImage(operationCtx, client, item, attachmentID)
 			if err != nil {
-				return "", "", err
+				return deliverySendResult{}, err
 			}
 		}
 		orderedKeys = append(orderedKeys, key)
 	}
 	content, err := renderOutreachImagePost(item.SemanticPayload, item.Target, orderedKeys)
 	if err != nil {
-		return "", "", err
+		return deliverySendResult{}, err
 	}
-	messageID, requestID, err := sendRenderedDelivery(operationCtx, client, item, "post", content)
-	return messageID, requestID, mediaStageError("send", err)
+	sent, err := sendRenderedDelivery(operationCtx, client, item, "post", content)
+	return sent, mediaStageError("send", err)
 }

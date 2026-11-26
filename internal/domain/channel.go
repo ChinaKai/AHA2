@@ -356,10 +356,16 @@ type ChannelInboundSummary struct {
 	Outcome string `json:"outcome,omitempty"`
 }
 
+const (
+	FeishuTopicWakeFull    = "full"
+	FeishuTopicWakeMention = "mention"
+)
+
 type FeishuGroup struct {
 	ChatID             string `json:"chat_id"`
 	DisplayName        string `json:"display_name,omitempty"`
 	ReceiveAllMessages bool   `json:"receive_all_messages"`
+	TopicWakeMode      string `json:"topic_wake_mode"`
 	UpdatedAt          string `json:"updated_at,omitempty"`
 	UpdatedBy          string `json:"updated_by,omitempty"`
 }

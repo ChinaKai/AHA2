@@ -825,7 +825,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 				messageID = "provider-card-1"
 				confirmation = delivery
 			}
-			if err := service.AckDelivery(ctx, deliveryClaims, delivery.ID, delivery.LeaseID, messageID, "request-1"); err != nil {
+			if err := service.AckDelivery(ctx, deliveryClaims, delivery.ID, delivery.LeaseID, messageID, "request-1", nil); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -854,7 +854,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}
 	dead := resultDeliveries[0]
 	for _, item := range resultDeliveries[1:] {
-		if err := service.AckDelivery(ctx, deliveryClaims, item.ID, item.LeaseID, "provider-prior", "request-prior"); err != nil {
+		if err := service.AckDelivery(ctx, deliveryClaims, item.ID, item.LeaseID, "provider-prior", "request-prior", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -871,7 +871,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil || len(unblocked) != 1 || unblocked[0].StreamSequence <= dead.StreamSequence {
 		t.Fatalf("dead letter blocked later delivery: %#v err=%v", unblocked, err)
 	}
-	if err := service.AckDelivery(ctx, deliveryClaims, unblocked[0].ID, unblocked[0].LeaseID, "provider-unblocked", "request-unblocked"); err != nil {
+	if err := service.AckDelivery(ctx, deliveryClaims, unblocked[0].ID, unblocked[0].LeaseID, "provider-unblocked", "request-unblocked", nil); err != nil {
 		t.Fatal(err)
 	}
 	attempts, err := database.ChannelDeliveryAttempts(ctx, dead.ID)
@@ -886,7 +886,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil || len(replayed) != 1 || replayed[0].ReplayOfID != dead.ID {
 		t.Fatalf("replayed=%#v err=%v", replayed, err)
 	}
-	if err := service.AckDelivery(ctx, deliveryClaims, replayed[0].ID, replayed[0].LeaseID, "provider-replay", "request-replay"); err != nil {
+	if err := service.AckDelivery(ctx, deliveryClaims, replayed[0].ID, replayed[0].LeaseID, "provider-replay", "request-replay", nil); err != nil {
 		t.Fatal(err)
 	}
 	replayItem, err := database.ChannelDelivery(ctx, replayed[0].ID)

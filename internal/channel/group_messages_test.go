@@ -101,6 +101,7 @@ func TestFeishuGroupListeningAndImmediateTurns(t *testing.T) {
 		t.Fatalf("listener created attachment commands: %v err=%v", commands, err)
 	}
 
+	acceptTestFeishuTopicDelivery(t, service, instance, conversation.ID, "omt_a")
 	firstMessage := groupMessage("om_first", chat, "omt_a", "om_root", "user", "WAKE_FIRST", false)
 	first, _, err := service.ReceiveInbound(ctx, claims, firstMessage)
 	if err != nil {
@@ -339,6 +340,7 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 					t.Fatal(err)
 				}
 				setTestGroupReception(t, service, instance, chat, true)
+				acceptTestFeishuTopicDelivery(t, service, instance, conversation.ID, "omt_continue")
 				quiet := first
 				quiet.ExternalEventID, quiet.ExternalMessageID, quiet.Content = "quiet-event", "om_quiet", "non-mention must not migrate"
 				quiet.MentionedBot = false

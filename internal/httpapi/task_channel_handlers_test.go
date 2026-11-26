@@ -444,7 +444,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	if imageKeys[attachment.ID] != "provider-image-key" {
 		t.Fatalf("outreach retry=%#v keys=%#v err=%v", claimed, imageKeys, err)
 	}
-	if err := channelService.AckDelivery(ctx, deliveryClaims, claimed[0].ID, claimed[0].LeaseID, "provider-post-message", "provider-request"); err != nil {
+	if err := channelService.AckDelivery(ctx, deliveryClaims, claimed[0].ID, claimed[0].LeaseID, "provider-post-message", "provider-request", nil); err != nil {
 		t.Fatal(err)
 	}
 	// The Owner often asks for a plain group post, so no mention is required and

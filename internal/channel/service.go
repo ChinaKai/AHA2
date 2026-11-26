@@ -1480,28 +1480,14 @@ func (s *Service) ClaimDeliveries(ctx context.Context, claims RuntimeClaims, lim
 	if !claims.Scopes["channel.delivery.claim"] {
 		return nil, fmt.Errorf("capability_scope_denied")
 	}
-	items, err := s.store.ClaimChannelDeliveries(ctx, claims.InstanceID, limit, s.now().UTC(), 30*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	for index := range items {
-		items[index].Target, _ = s.store.ChannelDeliveryTarget(ctx, items[index].ConversationID, items[index].SourceEventSequence)
-		if items[index].SemanticPayload["kind"] == "action_result" {
-			actionID := strings.TrimSpace(fmt.Sprint(items[index].SemanticPayload["action_id"]))
-			if messageID, messageErr := s.store.ChannelActionProviderMessage(ctx, actionID, claims.InstanceID); messageErr == nil && messageID != "" {
-				items[index].Target["update_message_id"] = messageID
-				delete(items[index].Target, "reply_message_id")
-			}
-		}
-	}
-	return items, nil
+	return s.store.ClaimChannelDeliveries(ctx, claims.InstanceID, limit, s.now().UTC(), 30*time.Second)
 }
 
-func (s *Service) AckDelivery(ctx context.Context, claims RuntimeClaims, id, leaseID, providerMessageID, providerRequestID string) error {
+func (s *Service) AckDelivery(ctx context.Context, claims RuntimeClaims, id, leaseID, providerMessageID, providerRequestID string, providerThreadID *string) error {
 	if !claims.Scopes["channel.delivery.ack"] {
 		return fmt.Errorf("capability_scope_denied")
 	}
-	return s.store.AckChannelDelivery(ctx, claims.InstanceID, id, leaseID, providerMessageID, providerRequestID, s.now().UTC())
+	return s.store.AckChannelDelivery(ctx, claims.InstanceID, id, leaseID, providerMessageID, providerRequestID, providerThreadID, s.now().UTC())
 }
 
 func (s *Service) NackDelivery(ctx context.Context, claims RuntimeClaims, id, leaseID, errorCode, certainty string, retryAfter time.Duration, permanent bool, providerRequestID string) error {
@@ -1770,6 +1756,12 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		groupReceipt, err = s.store.ChannelGroupReceipt(ctx, receipt.ID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		if !envelope.MentionedBot && groupReceipt.BatchID != "" {
+			listened, err := s.store.ListenPendingFeishuTopic(ctx, receipt, groupReceipt, envelope, s.now().UTC())
+			if err != nil || listened {
+				return err
+			}
 		}
 		if groupReceipt.BatchID != "" && (groupReceipt.ConversationID != groupConversation.ID ||
 			groupReceipt.RouteID != groupRoute.ID || (groupRoute.ID != "" && groupReceipt.TargetTaskID != groupRoute.TargetTaskID)) {

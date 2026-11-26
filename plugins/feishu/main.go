@@ -61,14 +61,15 @@ type command struct {
 }
 
 type delivery struct {
-	ID               string            `json:"id"`
-	IdempotencyKey   string            `json:"idempotency_key"`
-	SemanticPayload  map[string]any    `json:"semantic_payload"`
-	Target           map[string]string `json:"target"`
-	LeaseID          string            `json:"lease_id"`
-	Attempts         int               `json:"attempts"`
-	FirstAttemptAt   time.Time         `json:"first_attempt_at"`
-	OutcomeCertainty string            `json:"outcome_certainty"`
+	ID                string            `json:"id"`
+	IdempotencyKey    string            `json:"idempotency_key"`
+	SemanticPayload   map[string]any    `json:"semantic_payload"`
+	Target            map[string]string `json:"target"`
+	LeaseID           string            `json:"lease_id"`
+	Attempts          int               `json:"attempts"`
+	FirstAttemptAt    time.Time         `json:"first_attempt_at"`
+	OutcomeCertainty  string            `json:"outcome_certainty"`
+	providerThreadAck bool
 }
 
 type secretMessage struct {
@@ -1186,7 +1187,8 @@ func defaultFeishuMenuKeys() []string {
 func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
 	for ctx.Err() == nil {
 		var result struct {
-			Deliveries []delivery `json:"deliveries"`
+			Deliveries        []delivery `json:"deliveries"`
+			ProviderThreadAck bool       `json:"provider_thread_ack"`
 		}
 		err := c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/instances/"+c.instanceID+"/deliveries:claim", map[string]any{"schema_version": 1, "limit": 20}, &result)
 		if err != nil {
@@ -1194,6 +1196,7 @@ func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
 			continue
 		}
 		for _, item := range result.Deliveries {
+			item.providerThreadAck = result.ProviderThreadAck
 			c.deliver(ctx, client, item)
 		}
 		if len(result.Deliveries) == 0 {
@@ -1203,17 +1206,21 @@ func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
 }
 
 func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item delivery) {
-	var messageID, requestID string
+	var sent deliverySendResult
 	var err error
 	if stringValue(item.SemanticPayload, "kind") == "attachment" {
-		messageID, requestID, err = c.sendAttachmentDelivery(ctx, client, item)
+		sent, err = c.sendAttachmentDelivery(ctx, client, item)
 	} else if stringValue(item.SemanticPayload, "kind") == "agent_outreach" && len(deliveryImageItems(item.SemanticPayload)) > 0 {
-		messageID, requestID, err = c.sendOutreachImageDelivery(ctx, client, item)
+		sent, err = c.sendOutreachImageDelivery(ctx, client, item)
 	} else {
-		messageID, requestID, err = sendDelivery(ctx, client, item)
+		sent, err = sendDelivery(ctx, client, item)
 	}
 	if err == nil {
-		_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/ack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "provider_message_id": messageID, "provider_request_id": requestID}, &map[string]any{})
+		ack := map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "provider_message_id": sent.messageID, "provider_request_id": sent.requestID}
+		if item.providerThreadAck && sent.threadID != nil {
+			ack["provider_thread_id"] = *sent.threadID
+		}
+		_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/ack", ack, &map[string]any{})
 		return
 	}
 	failure := classifyDeliveryError(err)
@@ -1221,7 +1228,7 @@ func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item d
 	_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/nack", map[string]any{
 		"schema_version": 1, "lease_id": item.LeaseID, "error_code": failure.code,
 		"outcome_certainty": certainty, "retry_after_ms": deliveryBackoffMS(item.IdempotencyKey, item.Attempts),
-		"permanent": permanent, "provider_request_id": requestID,
+		"permanent": permanent, "provider_request_id": sent.requestID,
 	}, &map[string]any{})
 }
 
@@ -1240,13 +1247,19 @@ func deliveryBackoffMS(key string, attempt int) int64 {
 	return 1 + seed%limit
 }
 
-func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
+type deliverySendResult struct {
+	messageID string
+	requestID string
+	threadID  *string
+}
+
+func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (deliverySendResult, error) {
 	msgType, content := renderDelivery(item.SemanticPayload)
 	msgType, content = applyDeliveryMentions(msgType, content, item.Target)
 	return sendRenderedDelivery(ctx, client, item, msgType, content)
 }
 
-func sendRenderedDelivery(ctx context.Context, client *lark.Client, item delivery, msgType, content string) (string, string, error) {
+func sendRenderedDelivery(ctx context.Context, client *lark.Client, item delivery, msgType, content string) (deliverySendResult, error) {
 	receiveID := item.Target["receive_id"]
 	receiveIDType := item.Target["receive_id_type"]
 	if receiveID == "" {
@@ -1256,37 +1269,37 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 		receiveIDType = "chat_id"
 	}
 	if receiveID == "" {
-		return "", "", deliverySendFailure{code: "feishu_target_missing"}
+		return deliverySendResult{}, deliverySendFailure{code: "feishu_target_missing"}
 	}
 	if updateID := item.Target["update_message_id"]; updateID != "" {
 		request := larkim.NewPatchMessageReqBuilder().MessageId(updateID).Body(larkim.NewPatchMessageReqBodyBuilder().Content(content).Build()).Build()
 		response, err := client.Im.V1.Message.Patch(ctx, request)
 		if err != nil {
-			return "", "", err
+			return deliverySendResult{}, err
 		}
 		if !response.Success() {
-			return "", response.RequestId(), deliveryResponseError(item, "patch", response.StatusCode, response.Code)
+			return deliverySendResult{requestID: response.RequestId()}, deliveryResponseError(item, "patch", response.StatusCode, response.Code)
 		}
-		return updateID, response.RequestId(), nil
+		return deliverySendResult{messageID: updateID, requestID: response.RequestId()}, nil
 	}
 	uuid := deterministicUUID(item.IdempotencyKey)
 	threadID, replyID := item.Target["thread_id"], item.Target["reply_message_id"]
 	if threadID != "" && replyID == "" {
 		replyID = item.Target["root_id"]
 		if replyID == "" {
-			return "", "", deliverySendFailure{code: "feishu_topic_target_missing"}
+			return deliverySendResult{}, deliverySendFailure{code: "feishu_topic_target_missing"}
 		}
 	}
 	if replyID != "" {
-		messageID, requestID, err := replyRenderedDelivery(ctx, client, item, replyID, threadID != "", msgType, content, uuid)
+		sent, err := replyRenderedDelivery(ctx, client, item, replyID, threadID != "", msgType, content, uuid)
 		var failure deliverySendFailure
 		if err == nil || !errors.As(err, &failure) || !failure.replyTargetInvalid {
-			return messageID, requestID, err
+			return sent, err
 		}
 		if threadID != "" {
 			rootID := item.Target["root_id"]
 			if rootID == "" || rootID == replyID {
-				return "", requestID, err
+				return sent, err
 			}
 			return replyRenderedDelivery(ctx, client, item, rootID, true, msgType, content, uuid)
 		}
@@ -1294,18 +1307,18 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 	request := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(receiveID).MsgType(msgType).Content(content).Uuid(uuid).Build()).Build()
 	response, err := client.Im.V1.Message.Create(ctx, request)
 	if err != nil {
-		return "", "", err
+		return deliverySendResult{}, err
 	}
 	if !response.Success() || response.Data == nil || response.Data.MessageId == nil {
 		if response.Success() {
-			return "", response.RequestId(), invalidDeliveryResponse("create")
+			return deliverySendResult{requestID: response.RequestId()}, invalidDeliveryResponse("create")
 		}
-		return "", response.RequestId(), deliveryResponseError(item, "create", response.StatusCode, response.Code)
+		return deliverySendResult{requestID: response.RequestId()}, deliveryResponseError(item, "create", response.StatusCode, response.Code)
 	}
-	return *response.Data.MessageId, response.RequestId(), nil
+	return deliverySendResult{messageID: *response.Data.MessageId, requestID: response.RequestId(), threadID: response.Data.ThreadId}, nil
 }
 
-func replyRenderedDelivery(ctx context.Context, client *lark.Client, item delivery, replyID string, inThread bool, msgType, content, uuid string) (string, string, error) {
+func replyRenderedDelivery(ctx context.Context, client *lark.Client, item delivery, replyID string, inThread bool, msgType, content, uuid string) (deliverySendResult, error) {
 	body := larkim.NewReplyMessageReqBodyBuilder().MsgType(msgType).Content(content).Uuid(uuid)
 	if inThread {
 		body.ReplyInThread(true)
@@ -1313,15 +1326,15 @@ func replyRenderedDelivery(ctx context.Context, client *lark.Client, item delive
 	request := larkim.NewReplyMessageReqBuilder().MessageId(replyID).Body(body.Build()).Build()
 	response, err := client.Im.V1.Message.Reply(ctx, request)
 	if err != nil {
-		return "", "", err
+		return deliverySendResult{}, err
 	}
 	if response.Success() {
 		if response.Data == nil || response.Data.MessageId == nil {
-			return "", response.RequestId(), invalidDeliveryResponse("reply")
+			return deliverySendResult{requestID: response.RequestId()}, invalidDeliveryResponse("reply")
 		}
-		return *response.Data.MessageId, response.RequestId(), nil
+		return deliverySendResult{messageID: *response.Data.MessageId, requestID: response.RequestId(), threadID: response.Data.ThreadId}, nil
 	}
-	return "", response.RequestId(), deliveryResponseError(item, "reply", response.StatusCode, response.Code)
+	return deliverySendResult{requestID: response.RequestId()}, deliveryResponseError(item, "reply", response.StatusCode, response.Code)
 }
 
 func renderOutreachImagePost(payload map[string]any, target map[string]string, imageKeys []string) (string, error) {

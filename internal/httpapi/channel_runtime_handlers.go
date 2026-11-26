@@ -195,21 +195,26 @@ func (s *Server) channelRuntimeClaimDeliveries(writer http.ResponseWriter, reque
 		writeChannelRuntimeError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "deliveries": items})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "deliveries": items, "provider_thread_ack": true})
 }
 
 func (s *Server) channelRuntimeDeliveryAck(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		SchemaVersion     int    `json:"schema_version"`
-		LeaseID           string `json:"lease_id"`
-		ProviderMessageID string `json:"provider_message_id"`
-		ProviderRequestID string `json:"provider_request_id"`
+		SchemaVersion     int     `json:"schema_version"`
+		LeaseID           string  `json:"lease_id"`
+		ProviderMessageID string  `json:"provider_message_id"`
+		ProviderRequestID string  `json:"provider_request_id"`
+		ProviderThreadID  *string `json:"provider_thread_id"`
 	}
 	if err := decodeJSON(request, &payload); err != nil || payload.SchemaVersion != 1 || payload.LeaseID == "" || payload.ProviderMessageID == "" {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
 		return
 	}
-	if err := s.channels.AckDelivery(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), payload.LeaseID, payload.ProviderMessageID, payload.ProviderRequestID); err != nil {
+	if payload.ProviderThreadID != nil && (len(*payload.ProviderThreadID) > 128 || strings.ContainsAny(*payload.ProviderThreadID, " \t\r\n")) {
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
+		return
+	}
+	if err := s.channels.AckDelivery(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), payload.LeaseID, payload.ProviderMessageID, payload.ProviderRequestID, payload.ProviderThreadID); err != nil {
 		writeChannelRuntimeError(writer, err)
 		return
 	}

@@ -125,11 +125,11 @@ func (s *Store) FeishuGroupMessageAllowlist(ctx context.Context, instance domain
 
 func scanFeishuGroup(scanner interface{ Scan(...any) error }) (domain.FeishuGroup, error) {
 	var group domain.FeishuGroup
-	err := scanner.Scan(&group.ChatID, &group.DisplayName, &group.ReceiveAllMessages, &group.UpdatedAt, &group.UpdatedBy)
+	err := scanner.Scan(&group.ChatID, &group.DisplayName, &group.ReceiveAllMessages, &group.TopicWakeMode, &group.UpdatedAt, &group.UpdatedBy)
 	return group, err
 }
 
-const feishuGroupColumns = `chat_id,display_name,receive_all_messages,updated_at,updated_by`
+const feishuGroupColumns = `chat_id,display_name,receive_all_messages,topic_wake_mode,updated_at,updated_by`
 
 const FeishuGroupRefreshCommand = "sync_feishu_groups"
 
@@ -225,9 +225,10 @@ func (s *Store) SetFeishuGroupReception(ctx context.Context, instanceID, ownerID
 		return domain.FeishuGroup{}, false, err
 	}
 	group, err := scanFeishuGroup(tx.QueryRowContext(ctx, `
-		SELECT g.chat_id,g.display_name,g.receive_all_messages,g.updated_at,g.updated_by
-		FROM channel_feishu_groups g JOIN channel_instances i ON i.id=g.instance_id
-		WHERE g.instance_id=? AND g.chat_id=? AND i.owner_id=? AND i.retired_at=''`, instanceID, chatID, ownerID))
+		SELECT `+feishuGroupColumns+` FROM channel_feishu_groups
+		WHERE instance_id=? AND chat_id=? AND EXISTS (
+		    SELECT 1 FROM channel_instances WHERE id=? AND owner_id=? AND retired_at=''
+		)`, instanceID, chatID, instanceID, ownerID))
 	if err != nil {
 		return domain.FeishuGroup{}, false, err
 	}

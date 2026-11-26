@@ -151,12 +151,25 @@ func (s *Store) ReceiveChannelGroupMessage(ctx context.Context, receipt domain.C
 			return domain.ChannelInboxReceipt{}, false, err
 		}
 	}
-	if !envelope.MentionedBot && envelope.ThreadID == "" {
-		return storeListeningMessage(ctx, tx, receipt, route, envelope)
+	if !envelope.MentionedBot {
+		wakes, err := feishuTopicWakes(ctx, tx, receipt.InstanceID, envelope.ExternalChatID, envelope.ThreadID)
+		if err != nil {
+			return domain.ChannelInboxReceipt{}, false, err
+		}
+		if !wakes {
+			listened, duplicate, err := storeListeningMessage(ctx, tx, receipt, route, envelope)
+			if err != nil {
+				return domain.ChannelInboxReceipt{}, false, err
+			}
+			return listened, duplicate, tx.Commit()
+		}
 	}
 	stored, duplicate, err := receiveChannelInbox(ctx, tx, receipt)
 	if err != nil || duplicate {
 		return stored, duplicate, err
+	}
+	if err := restoreFeishuTopicOnMention(ctx, tx, stored); err != nil {
+		return domain.ChannelInboxReceipt{}, false, err
 	}
 	// Keep the receipt metadata compatible with pending messages from older cores.
 	// Each new receipt is independently eligible for scheduling.
@@ -189,7 +202,7 @@ func storeListeningMessage(ctx context.Context, tx *sql.Tx, receipt domain.Chann
 			route.ConversationID, messageID).Scan(&receipt.ID); err != nil {
 			return domain.ChannelInboxReceipt{}, false, err
 		}
-		return receipt, true, tx.Commit()
+		return receipt, true, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM channel_group_listening WHERE id IN (
@@ -198,7 +211,40 @@ func storeListeningMessage(ctx context.Context, tx *sql.Tx, receipt domain.Chann
 		)`, route.ConversationID, channelListeningPerGroup); err != nil {
 		return domain.ChannelInboxReceipt{}, false, err
 	}
-	return receipt, false, tx.Commit()
+	return receipt, false, nil
+}
+
+// Recheck queued receipts before resolving a host or downloading attachments.
+// This also covers non-mentions already in the channel queue at upgrade time.
+func (s *Store) ListenPendingFeishuTopic(ctx context.Context, receipt domain.ChannelInboxReceipt, group ChannelGroupReceipt, envelope domain.ChannelInboundEnvelope, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	wakes, err := feishuTopicWakes(ctx, tx, receipt.InstanceID, envelope.ExternalChatID, envelope.ThreadID)
+	if err != nil || wakes {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE channel_inbox_dedup SET state='processed',outcome='listening_only',lease_id='',lease_until='',processed_at=?,
+		    normalized_payload_json=json_remove(normalized_payload_json,'$.content','$.resources','$.reply_context')
+		WHERE id=? AND lease_id=? AND state='processing' AND aha_message_id=''
+	`, timeString(now), receipt.ID, receipt.LeaseID)
+	if err != nil {
+		return false, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return false, ErrChannelRevision
+	}
+	route := domain.ChannelTaskRoute{ConversationID: group.ConversationID, ID: group.RouteID, TargetTaskID: group.TargetTaskID}
+	if _, _, err := storeListeningMessage(ctx, tx, receipt, route, envelope); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_group_receipts WHERE receipt_id=?`, receipt.ID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 func (s *Store) PruneChannelListening(ctx context.Context, now time.Time) error {

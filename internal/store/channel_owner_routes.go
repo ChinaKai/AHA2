@@ -472,16 +472,19 @@ func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID string
 			}
 			delete(groups, destination.ExternalChatID)
 			group.ChatID = destination.ExternalChatID
+			if group.TopicWakeMode == "" {
+				group.TopicWakeMode = domain.FeishuTopicWakeFull
+			}
 			summary.Group = &group
 			if group.DisplayName != "" {
 				summary.DisplayName = group.DisplayName
 			}
 		}
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_inbox_dedup WHERE conversation_id=?`, destination.ConversationID).Scan(&summary.InboundCount); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_inbox_dedup WHERE conversation_id=? AND outcome<>'listening_only'`, destination.ConversationID).Scan(&summary.InboundCount); err != nil {
 			return nil, err
 		}
 		var receivedAt string
-		if err := s.db.QueryRowContext(ctx, `SELECT state,outcome,received_at FROM channel_inbox_dedup WHERE conversation_id=? ORDER BY received_at DESC,id DESC LIMIT 1`, destination.ConversationID).Scan(&summary.LastInboundState, &summary.LastInboundOutcome, &receivedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if err := s.db.QueryRowContext(ctx, `SELECT state,outcome,received_at FROM channel_inbox_dedup WHERE conversation_id=? AND outcome<>'listening_only' ORDER BY received_at DESC,id DESC LIMIT 1`, destination.ConversationID).Scan(&summary.LastInboundState, &summary.LastInboundOutcome, &receivedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		} else if err == nil {
 			summary.LastInboundAt = receivedAt
@@ -533,6 +536,7 @@ func (s *Store) feishuConversationInbound(ctx context.Context, summary *domain.C
 		err := s.db.QueryRowContext(ctx, `
 			SELECT received_at,state,outcome FROM channel_inbox_dedup
 			WHERE conversation_id=? AND event_type='message'
+			  AND outcome<>'listening_only'
 			  AND COALESCE(json_extract(normalized_payload_json,'$.mentioned_bot'),0)=?
 			ORDER BY received_at DESC,id DESC LIMIT 1`, summary.ID, mentioned).Scan(&latest.At, &latest.State, &latest.Outcome)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {

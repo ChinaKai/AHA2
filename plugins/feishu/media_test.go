@@ -270,7 +270,8 @@ func TestOutreachImageSendsMentionTextAndImageInOnePost(t *testing.T) {
 			}},
 		},
 	}
-	messageID, _, err := runtime.sendOutreachImageDelivery(context.Background(), client, item)
+	sent, err := runtime.sendOutreachImageDelivery(context.Background(), client, item)
+	messageID := sent.messageID
 	if err != nil || messageID != "sent-post" || reads != 1 || records != 2 || uploads != 1 || sends != 1 {
 		t.Fatalf("message=%q read/record/upload/send=%d/%d/%d/%d err=%v", messageID, reads, records, uploads, sends, err)
 	}
@@ -402,11 +403,12 @@ func TestMediaOutboundRetriesReusePersistedResource(t *testing.T) {
 			}}))
 			runtime := &runtimeClient{baseURL: runtimeServer.URL, token: "runtime-capability", http: runtimeServer.Client()}
 			item := delivery{ID: "delivery", IdempotencyKey: "delivery-key", LeaseID: "lease", Target: map[string]string{"chat_id": "chat"}, SemanticPayload: map[string]any{"kind": "attachment", "name": "report.txt"}}
-			if _, _, err := runtime.sendAttachmentDelivery(context.Background(), client, item); err == nil {
+			if _, err := runtime.sendAttachmentDelivery(context.Background(), client, item); err == nil {
 				t.Fatal("expected ambiguous first send")
 			}
 			item.SemanticPayload["provider_resource_key"], item.SemanticPayload["provider_resource_type"] = resourceKey, kind
-			message, _, err := runtime.sendAttachmentDelivery(context.Background(), client, item)
+			sent, err := runtime.sendAttachmentDelivery(context.Background(), client, item)
+			message := sent.messageID
 			if err != nil || message != "sent-message" || reads != 1 || uploads != 1 || sends != 2 {
 				t.Fatalf("message=%s read/upload/send=%d/%d/%d err=%v", message, reads, uploads, sends, err)
 			}

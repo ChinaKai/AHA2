@@ -60,7 +60,7 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 	if _, _, err := service.DeliveryAttachment(ctx, claims, first.ID, first.LeaseID, ""); err == nil {
 		t.Fatal("text delivery granted attachment access")
 	}
-	if err := service.AckDelivery(ctx, claims, first.ID, first.LeaseID, "text-message", ""); err != nil {
+	if err := service.AckDelivery(ctx, claims, first.ID, first.LeaseID, "text-message", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	for index, attachment := range attachments {
@@ -94,7 +94,7 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 			}
 			item = deliveries[0]
 		}
-		if err := service.AckDelivery(ctx, claims, item.ID, item.LeaseID, "file-message", ""); err != nil {
+		if err := service.AckDelivery(ctx, claims, item.ID, item.LeaseID, "file-message", "", nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := service.DeliveryAttachment(ctx, claims, item.ID, item.LeaseID, ""); err == nil {

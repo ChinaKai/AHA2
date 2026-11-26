@@ -27,10 +27,13 @@ func TestFeishuGroupReceptionMigratesLegacyAllowlist(t *testing.T) {
 	}
 	// Restore the actual v164 storage layout before writing legacy data.
 	if _, err := database.db.ExecContext(ctx, `
+		DROP TABLE channel_feishu_topics;
+		DROP TABLE channel_feishu_topic_revocations;
+		ALTER TABLE channel_delivery_attempts DROP COLUMN feishu_thread_id;
 		DROP TABLE channel_feishu_groups;
 		DROP TABLE channel_group_listening;
 		DROP TABLE channel_group_receipts;
-		DELETE FROM schema_migrations WHERE version=165;`+schemaChannelTopics); err != nil {
+		DELETE FROM schema_migrations WHERE version IN (165,166);`+schemaChannelTopics); err != nil {
 		t.Fatal(err)
 	}
 	const missingChat = "oc_not_yet_listed"
@@ -114,6 +117,7 @@ func TestFeishuGroupReceptionMigratesLegacyAllowlist(t *testing.T) {
 	groups, _, err := database.feishuConversationGroups(ctx, instance.ID)
 	migrated := groups[missingChat]
 	if err != nil || !migrated.ReceiveAllMessages || migrated.DisplayName != "Newly discovered" || migrated.UpdatedAt == "" || migrated.UpdatedBy != "" ||
+		migrated.TopicWakeMode != domain.FeishuTopicWakeFull || groups["oc_new_default"].TopicWakeMode != domain.FeishuTopicWakeFull ||
 		groups["oc_new_default"].ReceiveAllMessages || groups["oc_new_default"].UpdatedAt != "" {
 		t.Fatalf("refresh changed retention settings or invented an operator: %+v, %v", groups, err)
 	}

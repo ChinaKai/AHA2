@@ -47,6 +47,7 @@ var databaseCatalog = []databaseCategoryDef{
 		"channel_onboarding_sessions", "channel_pending_actions", "channel_knowledge_grants",
 		"channel_knowledge_policies", "channel_handoffs",
 		"channel_group_listening", "channel_group_receipts", "channel_topic_turns", "channel_feishu_groups",
+		"channel_feishu_topics", "channel_feishu_topic_revocations",
 	}},
 	{"F", "mail", domain.DatabaseSafetyKeep, "", []string{
 		"mail_accounts", "mail_account_aliases", "mail_templates", "mail_template_versions", "mail_bindings",

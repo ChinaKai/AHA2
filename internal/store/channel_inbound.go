@@ -106,7 +106,24 @@ func scanChannelInbox(scanner interface{ Scan(...any) error }) (domain.ChannelIn
 }
 
 func (s *Store) ReceiveChannelInbox(ctx context.Context, item domain.ChannelInboxReceipt) (domain.ChannelInboxReceipt, bool, error) {
-	return receiveChannelInbox(ctx, s.db, item)
+	if !isFeishuTopicMention(item) {
+		return receiveChannelInbox(ctx, s.db, item)
+	}
+	// The group route can disappear between lookup and ingress. Keep mention
+	// restoration atomic with the fallback receipt as well.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ChannelInboxReceipt{}, false, err
+	}
+	defer tx.Rollback()
+	stored, duplicate, err := receiveChannelInbox(ctx, tx, item)
+	if err != nil || duplicate {
+		return stored, duplicate, err
+	}
+	if err := restoreFeishuTopicOnMention(ctx, tx, stored); err != nil {
+		return domain.ChannelInboxReceipt{}, false, err
+	}
+	return stored, false, tx.Commit()
 }
 
 func receiveChannelInbox(ctx context.Context, db interface {

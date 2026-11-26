@@ -332,9 +332,3 @@ func (s *Store) BindChannelActionProviderMessage(ctx context.Context, actionID, 
 	}
 	return nil
 }
-
-func (s *Store) ChannelActionProviderMessage(ctx context.Context, actionID, instanceID string) (string, error) {
-	var value string
-	err := s.db.QueryRowContext(ctx, `SELECT provider_message_id FROM channel_pending_actions WHERE id=? AND instance_id=?`, actionID, instanceID).Scan(&value)
-	return value, err
-}

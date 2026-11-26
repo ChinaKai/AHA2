@@ -4394,6 +4394,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateFeishuGroups(ctx); err != nil {
 		return fmt.Errorf("apply schema v165 Feishu groups: %w", err)
 	}
+	if err := s.migrateFeishuTopicWake(ctx); err != nil {
+		return fmt.Errorf("apply schema v166 Feishu topic wake: %w", err)
+	}
 	return nil
 }
 

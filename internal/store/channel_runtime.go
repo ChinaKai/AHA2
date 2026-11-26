@@ -287,8 +287,22 @@ func (s *Store) ClaimChannelDeliveries(ctx context.Context, instanceID string, l
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_attempts(id,delivery_id,attempt_no,lease_id,outcome,error_code,retry_after_ms,provider_request_id,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			domain.NewID("channel_delivery_attempt"), item.ID, item.Attempts, leaseID, "leased", "", 0, "", timeString(now), ""); err != nil {
+		item.Target, _ = channelDeliveryTarget(ctx, tx, item.ConversationID, item.SourceEventSequence)
+		if item.SemanticPayload["kind"] == "action_result" && item.Target != nil {
+			actionID := strings.TrimSpace(fmt.Sprint(item.SemanticPayload["action_id"]))
+			var messageID string
+			if err := tx.QueryRowContext(ctx, `SELECT provider_message_id FROM channel_pending_actions
+				WHERE id=? AND instance_id=?`, actionID, instanceID).Scan(&messageID); err == nil && messageID != "" {
+				item.Target["update_message_id"] = messageID
+				delete(item.Target, "reply_message_id")
+			}
+		}
+		threadID := item.Target["thread_id"]
+		if item.Target["update_message_id"] != "" {
+			threadID = ""
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_attempts(id,delivery_id,attempt_no,lease_id,outcome,error_code,retry_after_ms,provider_request_id,started_at,finished_at,feishu_thread_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			domain.NewID("channel_delivery_attempt"), item.ID, item.Attempts, leaseID, "leased", "", 0, "", timeString(now), "", threadID); err != nil {
 			return nil, err
 		}
 		claimed = append(claimed, item)
@@ -303,7 +317,7 @@ func (s *Store) ClaimChannelDeliveries(ctx context.Context, instanceID string, l
 // and assigned a provider message ID. It does not prove the message reached or
 // was rendered on the recipient's device; the certainty is therefore
 // "provider_accepted", never "confirmed".
-func (s *Store) AckChannelDelivery(ctx context.Context, instanceID, id, leaseID, providerMessageID, providerRequestID string, at time.Time) error {
+func (s *Store) AckChannelDelivery(ctx context.Context, instanceID, id, leaseID, providerMessageID, providerRequestID string, providerThreadID *string, at time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -343,6 +357,11 @@ func (s *Store) AckChannelDelivery(ctx context.Context, instanceID, id, leaseID,
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_attempts SET outcome='provider_accepted',provider_request_id=?,finished_at=? WHERE delivery_id=? AND lease_id=?`, providerRequestID, timeString(at), id, leaseID); err != nil {
 		return err
+	}
+	if providerMessageID != "" {
+		if err := recordFeishuTopicParticipation(ctx, tx, instanceID, conversationID, id, leaseID, providerThreadID, at); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -610,8 +629,14 @@ func setChannelReplyTarget(target map[string]string, normalizedPayloadJSON strin
 }
 
 func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string, sourceEventSequence int64) (map[string]string, error) {
+	return channelDeliveryTarget(ctx, s.db, conversationID, sourceEventSequence)
+}
+
+func channelDeliveryTarget(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, conversationID string, sourceEventSequence int64) (map[string]string, error) {
 	var chatID, senderID, instanceID string
-	if err := s.db.QueryRowContext(ctx, `SELECT external_chat_id,external_sender_id,instance_id FROM channel_conversations WHERE id=? AND status='active'`, conversationID).Scan(&chatID, &senderID, &instanceID); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT external_chat_id,external_sender_id,instance_id FROM channel_conversations WHERE id=? AND status='active'`, conversationID).Scan(&chatID, &senderID, &instanceID); err != nil {
 		return nil, err
 	}
 	target := map[string]string{"sender_id": senderID}
@@ -625,13 +650,13 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 	}
 	var taskID, roundID, sourcePayloadJSON string
 	if sourceEventSequence > 0 {
-		_ = s.db.QueryRowContext(ctx, `SELECT task_id,round_id,semantic_payload_json FROM channel_source_events WHERE sequence=?`, sourceEventSequence).Scan(&taskID, &roundID, &sourcePayloadJSON)
+		_ = db.QueryRowContext(ctx, `SELECT task_id,round_id,semantic_payload_json FROM channel_source_events WHERE sequence=?`, sourceEventSequence).Scan(&taskID, &roundID, &sourcePayloadJSON)
 	}
 	sourcePayload := decodeJSON(sourcePayloadJSON, map[string]any{})
 	replyReceiptID := strings.TrimSpace(fmt.Sprint(sourcePayload["reply_to_receipt_id"]))
 	if replyReceiptID != "" && replyReceiptID != "<nil>" {
 		var normalizedPayloadJSON string
-		if err := s.db.QueryRowContext(ctx, `
+		if err := db.QueryRowContext(ctx, `
 			SELECT normalized_payload_json FROM channel_inbox_dedup
 			WHERE id=? AND conversation_id=? AND state='processed'`,
 			replyReceiptID, conversationID,
@@ -641,7 +666,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 		setChannelReplyTarget(target, normalizedPayloadJSON)
 	} else if taskID != "" && roundID != "" {
 		var receiptPayload, actorID string
-		err := s.db.QueryRowContext(ctx, `
+		err := db.QueryRowContext(ctx, `
 			SELECT r.normalized_payload_json,COALESCE(json_extract(i.payload_json,'$.channel_context.actor.identity_link_id'),'')
 			FROM conversation_items i
 			JOIN channel_inbox_dedup r ON r.id=json_extract(i.payload_json,'$.channel_receipt_id')
@@ -652,7 +677,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 			setChannelReplyTarget(target, receiptPayload)
 			if target["reply_message_id"] != "" {
 				var userID, name string
-				err = s.db.QueryRowContext(ctx, `
+				err = db.QueryRowContext(ctx, `
 					SELECT external_user_id,display_name FROM channel_identity_links
 					WHERE id=? AND instance_id=? AND status='active'`, actorID, instanceID).Scan(&userID, &name)
 				if err == nil && userID != "" {
@@ -677,7 +702,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 					continue
 				}
 				var externalUserID, displayName string
-				if err := s.db.QueryRowContext(ctx, `
+				if err := db.QueryRowContext(ctx, `
 					SELECT identity.external_user_id,identity.display_name
 					FROM channel_identity_links identity
 					JOIN channel_conversation_members member
@@ -707,7 +732,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 	}
 	if target["reply_message_id"] == "" && roundID == "" && strings.TrimSpace(fmt.Sprint(sourcePayload["kind"])) != "agent_outreach" {
 		var payloadJSON string
-		if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' AND outcome<>'listening_only'
+		if err := db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' AND outcome<>'listening_only'
 			ORDER BY received_at DESC,rowid DESC LIMIT 1`, conversationID).Scan(&payloadJSON); err == nil {
 			setChannelReplyTarget(target, payloadJSON)
 		}

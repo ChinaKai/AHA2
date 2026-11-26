@@ -259,6 +259,12 @@ func TestFeishuTopicLiveInboxMatchesTurnAndRechecksPermission(t *testing.T) {
 		return round, item
 	}
 
+	for _, thread := range []string{"omt_release", "omt_other"} {
+		if _, err := database.db.ExecContext(ctx, `INSERT INTO channel_feishu_topics VALUES(?,?,?,?)`,
+			instance.ID, conversation.ExternalChatID, thread, timeString(now)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	round, first := enqueue("receipt-start", "omt_release", true, true)
 	turn, _, err := database.ClaimInboxAndCreateTurn(ctx, domain.Turn{
 		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main", InputMessageID: first.MessageID,

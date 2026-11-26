@@ -116,7 +116,7 @@ func TestChannelDeliveryClaimUnblocksAfterDeadLetter(t *testing.T) {
 	if err != nil || len(claimed) != 1 || claimed[0].ID != second.ID || claimed[0].Attempts != 1 {
 		t.Fatalf("claim after dead letter=%#v err=%v", claimed, err)
 	}
-	if err := database.AckChannelDelivery(ctx, instance.ID, second.ID, claimed[0].LeaseID, "om_accepted", "req-accepted", now.Add(2*time.Second)); err != nil {
+	if err := database.AckChannelDelivery(ctx, instance.ID, second.ID, claimed[0].LeaseID, "om_accepted", "req-accepted", nil, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, err := database.ChannelDelivery(ctx, second.ID)
@@ -705,7 +705,7 @@ func TestChannelRouteCardFollowsLiveDeliveryAndReplayChain(t *testing.T) {
 		t.Fatalf("claimed second replay %s, want %s", claimed.ID, secondReplay.ID)
 	}
 	if err := database.AckChannelDelivery(ctx, instance.ID, secondReplay.ID, claimed.LeaseID,
-		"om_second_replay", "req-second-replay", now.Add(4*time.Second)); err != nil {
+		"om_second_replay", "req-second-replay", nil, now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if state := readState(); state != "provider_accepted" {

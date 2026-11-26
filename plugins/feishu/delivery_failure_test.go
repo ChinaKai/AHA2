@@ -44,10 +44,11 @@ func TestReplyTargetWithdrawnFallsBackToCreate(t *testing.T) {
 			return mediaTestResponse(404, `{"code":404}`), nil
 		}
 	}}))
-	messageID, requestID, err := sendRenderedDelivery(context.Background(), client, delivery{
+	sent, err := sendRenderedDelivery(context.Background(), client, delivery{
 		IdempotencyKey: "fallback-key",
 		Target:         map[string]string{"chat_id": "oc_chat", "reply_message_id": "om_withdrawn"},
 	}, "text", `{"text":"hello"}`)
+	messageID, requestID := sent.messageID, sent.requestID
 	if err != nil || messageID != "om_fallback" || requestID != "req-create" {
 		t.Fatalf("message=%q request=%q err=%v", messageID, requestID, err)
 	}
@@ -72,10 +73,11 @@ func TestReplyRejectionStaysPermanentWithoutFallback(t *testing.T) {
 			return mediaTestResponse(404, `{"code":404}`), nil
 		}
 	}}))
-	_, requestID, err := sendRenderedDelivery(context.Background(), client, delivery{
+	sent, err := sendRenderedDelivery(context.Background(), client, delivery{
 		IdempotencyKey: "rejected-key",
 		Target:         map[string]string{"chat_id": "oc_chat", "reply_message_id": "om_parent"},
 	}, "text", `{"text":"hello"}`)
+	requestID := sent.requestID
 	if err == nil || requestID != "req-reply" {
 		t.Fatalf("request=%q err=%v", requestID, err)
 	}
@@ -262,10 +264,11 @@ func TestWithdrawnTopicReplyUsesRootAndNeverCreatesGroupMessage(t *testing.T) {
 				}
 				return deliveryResponse(400, "req-withdrawn", `{"code":230011,"msg":"message withdrawn"}`), nil
 			}}))
-			messageID, _, err := sendRenderedDelivery(context.Background(), client, delivery{
+			sent, err := sendRenderedDelivery(context.Background(), client, delivery{
 				IdempotencyKey: "topic-reply",
 				Target:         map[string]string{"chat_id": "oc_chat", "reply_message_id": "om_leaf", "thread_id": "omt_topic", "root_id": "om_root"},
 			}, "text", `{"text":"hello"}`)
+			messageID := sent.messageID
 			if len(replies) != 2 || !strings.Contains(replies[0], "/om_leaf/") || !strings.Contains(replies[1], "/om_root/") {
 				t.Fatalf("reply requests %v", replies)
 			}

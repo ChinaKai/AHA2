@@ -41,6 +41,43 @@ func setTestGroupReception(t *testing.T, service *Service, instance domain.Chann
 	}
 }
 
+func acceptTestFeishuTopicDelivery(t *testing.T, service *Service, instance domain.ChannelInstance, conversationID, threadID string) {
+	t.Helper()
+	ctx := context.Background()
+	now := service.now().UTC()
+	replyTo := domain.NewID("topic_fixture_receipt")
+	if _, _, err := service.store.ReceiveChannelInbox(ctx, domain.ChannelInboxReceipt{
+		ID: replyTo, InstanceID: instance.ID, ExternalEventID: replyTo, EventType: "message",
+		ConversationID: conversationID, State: "processed", ReceivedAt: now, OccurredAt: now, ProcessedAt: now,
+		NormalizedPayload: map[string]any{"external_message_id": "om_" + replyTo, "thread_id": threadID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.store.EnqueueChannelControlDelivery(ctx, instance.ID, conversationID, replyTo, "test_topic_reply",
+		map[string]any{"text": "Earlier reply", "reply_to_receipt_id": replyTo}, now); err != nil {
+		t.Fatal(err)
+	}
+	deliveryTime := now.Add(time.Minute)
+	for range 10 {
+		items, err := service.store.ClaimChannelDeliveries(ctx, instance.ID, 20, deliveryTime, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range items {
+			if err := service.store.AckChannelDelivery(ctx, instance.ID, item.ID, item.LeaseID, "om_"+item.ID, "", nil, deliveryTime); err != nil {
+				t.Fatal(err)
+			}
+			if item.SemanticPayload["reply_to_receipt_id"] == replyTo {
+				if item.Target["thread_id"] != threadID {
+					t.Fatalf("delivery missed thread %s: %+v", threadID, item.Target)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("topic reply was not claimed")
+}
+
 func TestFeishuGroupReceptionCanBeDisabledAfterGroupLeavesBotList(t *testing.T) {
 	service, instance, claims := mediaTestService(t)
 	ctx := context.Background()
@@ -140,7 +177,7 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 						ExternalEventID: eventID, ExternalMessageID: "om_" + eventID, Content: "matrix " + eventID,
 						MentionedBot: message.mentioned, SenderType: message.senderType, ThreadID: message.thread, OccurredAt: now,
 					}
-					if !message.mentioned && message.thread == "" {
+					if !message.mentioned {
 						envelope.Resources = []map[string]any{{"type": "file", "file_key": "must-not-download"}}
 					}
 					before, err := service.store.ListTasks(ctx, instance.HostProjectID)
@@ -157,7 +194,7 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 					if err != nil || duplicate {
 						t.Fatalf("receive: %+v, duplicate=%v, %v", receipt, duplicate, err)
 					}
-					if !message.mentioned && message.thread == "" {
+					if !message.mentioned {
 						if receipt.State != "listening" || receipt.NormalizedPayload != nil || len(service.wakeInbound) != 0 {
 							t.Fatalf("not a listening-only receipt: %+v", receipt)
 						}
@@ -173,7 +210,7 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 						if commands, err := service.ClaimCommands(ctx, claims, 10); err != nil || len(commands) != 0 {
 							t.Fatalf("listening queued a command: %v, %v", commands, err)
 						}
-						if group.bound {
+						if group.bound && message.thread == "" {
 							if task, err := service.store.Task(ctx, targetID); err != nil || task.Status != domain.TaskWaitingUser || !task.UpdatedAt.Equal(now) {
 								t.Fatalf("listening updated Task: %+v, %v", task, err)
 							}
@@ -183,8 +220,10 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 							if pending, err := service.store.PendingAgentInbox(ctx, targetID, "main"); err != nil || len(pending) != 0 {
 								t.Fatalf("listening queued agent messages: %v, %v", pending, err)
 							}
-						} else if conv, err := service.store.ChannelConversation(ctx, receipt.ConversationID); err != nil || conv.HostTaskID != "" {
-							t.Fatalf("listening created a group host: %+v, %v", conv, err)
+						} else if !group.bound {
+							if conv, err := service.store.ChannelConversation(ctx, receipt.ConversationID); err != nil || conv.HostTaskID != targetID {
+								t.Fatalf("listening changed the group host: %+v, %v", conv, err)
+							}
 						}
 						return
 					}
@@ -231,7 +270,7 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 	}
 }
 
-func TestUnboundFeishuTopicStartsHostAndListeningNeverContinuesIt(t *testing.T) {
+func TestUnboundFeishuTopicMentionStartsHostAndListeningNeverContinuesIt(t *testing.T) {
 	service, instance, claims := mediaTestService(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -243,24 +282,28 @@ func TestUnboundFeishuTopicStartsHostAndListeningNeverContinuesIt(t *testing.T) 
 	if _, err := service.store.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
 		t.Fatal(err)
 	}
-	send := func(id, thread, root, body string) domain.ChannelInboxReceipt {
+	send := func(id, thread, root, body string, mentioned bool) domain.ChannelInboxReceipt {
 		t.Helper()
 		receipt, duplicate, err := service.ReceiveInbound(ctx, claims, domain.ChannelInboundEnvelope{
 			SchemaVersion: 1, InstanceID: instance.ID, EventType: "message", ChatType: "group",
 			ExternalChatID: chat, ChatDisplayName: "话题测试", ExternalSenderID: "ou_user",
 			ExternalEventID: id, ExternalMessageID: id, Content: body, SenderType: "user",
-			ThreadID: thread, RootID: root, OccurredAt: now,
+			ThreadID: thread, RootID: root, OccurredAt: now, MentionedBot: mentioned,
 		})
 		if err != nil || duplicate {
 			t.Fatalf("receive %s: %+v, duplicate=%v, %v", id, receipt, duplicate, err)
 		}
 		return receipt
 	}
-	root := send("om_root", "", "", "ROOT_BEFORE_HOST")
+	root := send("om_root", "", "", "ROOT_BEFORE_HOST", false)
 	if root.State != "listening" {
 		t.Fatalf("first top-level message state: %s", root.State)
 	}
-	wake := send("om_thread", "omt_cold", "om_root", "A topic direct wake")
+	unparticipated := send("om_topic_before_host", "omt_cold", "om_root", "Topic before host", false)
+	if unparticipated.State != "listening" {
+		t.Fatalf("unparticipated topic state: %s", unparticipated.State)
+	}
+	wake := send("om_thread", "omt_cold", "om_root", "A topic mention", true)
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -296,6 +339,7 @@ func TestUnboundFeishuTopicStartsHostAndListeningNeverContinuesIt(t *testing.T) 
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
+	acceptTestFeishuTopicDelivery(t, service, instance, conv.ID, "omt_cold")
 	now = now.Add(time.Second)
 	if err := service.store.UpdateTaskStatus(ctx, host.ID, host.Status, domain.TaskCompleted, timeStringUTC(now), ""); err != nil {
 		t.Fatal(err)
@@ -305,7 +349,7 @@ func TestUnboundFeishuTopicStartsHostAndListeningNeverContinuesIt(t *testing.T) 
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
-	quiet := send("om_after_completion", "", "", "AFTER_COMPLETION")
+	quiet := send("om_after_completion", "", "", "AFTER_COMPLETION", false)
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -317,13 +361,13 @@ func TestUnboundFeishuTopicStartsHostAndListeningNeverContinuesIt(t *testing.T) 
 		t.Fatalf("listening created a new round: %+v, %v", after, err)
 	}
 	summaries, err := service.OwnerConversationSummaries(ctx, instance.OwnerID, instance.ID)
-	if err != nil || len(summaries) != 1 || summaries[0].InboundCount != 3 || summaries[0].LastMentionInbound != nil ||
+	if err != nil || len(summaries) != 1 || summaries[0].InboundCount != 5 || summaries[0].LastMentionInbound == nil ||
 		summaries[0].LastNonMentionInbound == nil || summaries[0].LastNonMentionInbound.State != quiet.State || quiet.State != "listening" {
 		t.Fatalf("conversation summary lost unbound listening: %+v, %v", summaries, err)
 	}
 
 	t.Run("non_mention_topic_after_host_completion", func(t *testing.T) {
-		topic := send("om_topic_after_completion", "omt_cold", "om_root", "Topic after host completion")
+		topic := send("om_topic_after_completion", "omt_cold", "om_root", "Topic after host completion", false)
 		metadata, err := service.store.ChannelGroupReceipt(ctx, topic.ID)
 		if err != nil || topic.State != "received" || metadata.BatchID == "" || metadata.RouteID != "" || metadata.TargetTaskID != host.ID {
 			t.Fatalf("topic receipt did not target the unbound host: state=%q metadata=%+v, %v", topic.State, metadata, err)
