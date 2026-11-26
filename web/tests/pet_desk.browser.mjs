@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile} from "node:fs/promises";
+import {mkdir} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
@@ -70,6 +71,31 @@ const desk = {
 };
 desk.waiting_others.push({kind: "loop", title: "等合作方答复接口格式", detail: "周五再问一次", on: "core/loops.md", since: "0001-01-01T00:00:00Z"});
 desk.waiting_others_total = desk.waiting_others.length;
+// Layout fixtures (owner's 2026-11-26 screenshot): "owner" has the same
+// amount of content as the live desk, "large" is the server's upper bound.
+const longReply = `这轮把 0.5.577 的来源查清了，不用你再解释：它的 commit \`061d1cf\` 就是 **task-813「宠物工作台改造计划」三步的合并提交**——那个 Task 13:53 说三步都合进 main、可以部署体验，14:18 就有人用同一个部署 Skill 把它装上了。已把这层关系记进 loops 和 worklog，0.5.577 运行正常（health ok，渠道 ready）。\n\n另外做了一件小事：**watch 了 task-813**。它改的是我的工作台（近 7 天、宠物上一轮、等待项、记录页），和我直接相关，但现在是你在推动、Opus 在做台账修复，我不插手，只在它收尾或部署后按真实数据体验并反馈。task-276 仍等王小二修两处统计问题；__其余项目__没有新的异常，渠道都在线，下一轮继续看部署后的真实数据和台账修复的评审结论，有变化再提给你。`.padEnd(400, "。");
+const ownerDesk = {
+  needs_owner: [{kind: "question", task_id: "t-276", task_code: "task-276", title: "Bulbcam本地录制改标志MP4+录制音频开关", questions: ["App 原因码与文案未定：只新增设备内部详情，不改现有异常 3/格式化 4。", "退避例外及 SD/云警检出帧口径、容差与降级，默认开关和直播影响阈值待确认。", "Wi-Fi 产测 FEATURE_ID 与低内存 RX 策略待正式整合前确定。"], since: minutesAgo(11)}],
+  needs_owner_total: 1, later: [], later_total: 0, waiting_others: [], waiting_others_total: 0,
+  running: [{task_id: "t-813", task_code: "task-813", title: "宠物工作台改造计划", status: "active", turn_status: "running", since: minutesAgo(11),
+    detail: "owner 说“删除并修复”：原任务分支已删除（已全部在 main 里）；宠物接口覆盖台账生成器的修复已派给 Opus，批次 collaboration_batch_996a7a35db9d7209c7a6，在新分支 aha/task_e40adf343e3e375b5f7c-coverage（从 main 061d1cf 建）上做，进行中。要修的是：扫描器不认裸函数名的 handler（server.go 三处 workspaceViewerMethodNotAllowed），之后还卡在 registerWorkspaceTerminalRoutes 未分类；修好后用 -update 重新生成三份台账。"}],
+  running_total: 1, corrections: [], open_loops: [], open_loops_total: 0, agenda: [], agenda_total: 0,
+  last_reply: {text: longReply, finished_at: minutesAgo(5), noop: false, from_wake: true},
+};
+const largeDesk = {
+  ...ownerDesk,
+  needs_owner: Array.from({length: 50}, (_, i) => ({kind: i % 2 ? "blocked" : "question", task_id: `t-n${i}`, task_code: `task-n${i}`, title: `要你定的第 ${i + 1} 件事`, detail: "说明文字".repeat(30), questions: ["问题一？", "问题二？"], since: minutesAgo(100 - i)})),
+  needs_owner_total: 50,
+  waiting_others: Array.from({length: 30}, (_, i) => ({kind: "review", task_id: `t-w${i}`, task_code: `task-w${i}`, title: `等别人的第 ${i + 1} 件`, on: "task-999", since: minutesAgo(40 + i)})),
+  waiting_others_total: 30,
+  running: Array.from({length: 30}, (_, i) => ({...ownerDesk.running[0], task_id: `t-r${i}`, task_code: `task-r${i}`})),
+  running_total: 30,
+};
+const ownerInsights = {
+  from: minutesAgo(7 * 24 * 60), to: minutesAgo(0), actions: 311,
+  approvals: {total: 67, approved: 40, rejected: 14, cancelled: 3, pending: 10, ideas: 1},
+  corrections: 14, wakes: {turns: 1497, noop: 194, tokens: 98765432, token_scope: "window"},
+};
 const insights = {
   from: minutesAgo(8 * 24 * 60), to: minutesAgo(0), actions: 12,
   approvals: {total: 5, approved: 2, rejected: 1, cancelled: 1, pending: 1, ideas: 3},
@@ -78,11 +104,20 @@ const insights = {
 const watches = [
   {task_id: "t-w", code: "task-9", title: "关注的任务", status: "active", watched: true, ignored: false, reason: "manual", created_at: minutesAgo(600), updated_at: minutesAgo(30)},
 ];
+// The layout desks also carry ignored and unfollowed tasks, so all three
+// follow lists render.
+const layoutWatches = [
+  ...watches,
+  ...Array.from({length: 20}, (_, i) => ({task_id: `t-ig${i}`, code: `task-ig${i}`, title: `忽略的任务 ${i}`, status: "active", watched: true, ignored: true, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(60 + i)})),
+  ...Array.from({length: 20}, (_, i) => ({task_id: `t-un${i}`, code: `task-un${i}`, title: `未关注的任务 ${i}`, status: "active", watched: false, ignored: false, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(80 + i)})),
+];
 
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const params = new URLSearchParams(location.search);
-window.__desk = params.get("desk") === "0" ? undefined : ${JSON.stringify(desk)};
+const layoutDesks = {owner: ${JSON.stringify(ownerDesk)}, large: ${JSON.stringify(largeDesk)}};
+window.__desk = params.get("desk") === "0" ? undefined : layoutDesks[params.get("desk")] || ${JSON.stringify(desk)};
+const weekInsights = layoutDesks[params.get("desk")] ? ${JSON.stringify(ownerInsights)} : ${JSON.stringify(insights)};
 window.__workbenchQueries = [];
 window.__taskReads = [];
 window.__approvalReads = [];
@@ -119,6 +154,7 @@ window.fetch = async (input, init = {}) => {
     window.__savedDocs = [...(window.__savedDocs || []), decodeURIComponent(path.split("/").pop())];
     return json({ok: true});
   }
+  if (path.startsWith("/api/v1/pet/watches/")) (window.__watchWrites ||= []).push([(init.method || "GET").toUpperCase(), decodeURIComponent(path.split("/").pop())]);
   if (path.startsWith("/api/v1/pet/approvals/") && (init.method || "GET").toUpperCase() === "GET") {
     const id = decodeURIComponent(path.split("/")[5]);
     window.__approvalReads.push(id);
@@ -144,7 +180,7 @@ window.fetch = async (input, init = {}) => {
       (window.__insightSignals ||= []).push(init.signal);
       await new Promise(resolve => window.__insightWaiters.push(resolve));
     }
-    return json({ok: true, insights: ${JSON.stringify(insights)}});
+    return json({ok: true, insights: weekInsights});
   }
   if (path === "/api/v1/pet/workbench") {
     const limit = Number(url.searchParams.get("approval_limit") || 50);
@@ -153,7 +189,7 @@ window.fetch = async (input, init = {}) => {
     return json({
       ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: allApprovals.length,
       approval_counts: [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
-      watches: ${JSON.stringify(watches)}, updated_at: new Date().toISOString(),
+      watches: layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}, updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
       channels: [{id: "c-1", name: "Mail", status: "degraded", pending: 3, degraded: true}], channel_total: 1,
       ...(window.__desk ? {desk: window.__desk} : {}),
@@ -271,7 +307,9 @@ try {
 
   // Item 1: block order; cards and recent activity are gone.
   const blocks = await page.evaluate(() => [...document.querySelector("#pet-workbench-body .pet-desk").children].map(el => el.className));
-  assert.deepEqual(blocks, ["pet-desk-status", "pet-desk-reply", "pet-desk-section pet-desk-needs", "pet-desk-pair", "pet-desk-section pet-desk-pet", "pet-desk-section pet-desk-insights", "pet-desk-follows"]);
+  assert.deepEqual(blocks, ["pet-desk-status", "pet-desk-reply", "pet-desk-board", "pet-desk-follows"]);
+  const columnBlocks = await page.evaluate(() => [...document.querySelectorAll("#pet-workbench-body .pet-desk-col")].map(col => [col.classList[1], [...col.children].map(el => el.id)]));
+  assert.deepEqual(columnBlocks, [["pet-desk-col-main", ["pet-desk-needs"]], ["pet-desk-col-side", ["pet-desk-waiting", "pet-desk-pet"]], ["pet-desk-col-run", ["pet-desk-running", "pet-desk-insights"]]]);
   // Step two, item 4: the last reply sits under the status row.
   assert.match(await body.locator(".pet-desk-reply").innerText(), /Pet's last check[\s\S]*推进了 task-790/);
   // Item 2: the last 7 days fill in after the desk.
@@ -523,6 +561,112 @@ try {
   await page.waitForTimeout(200);
   assert.equal(await body.locator(".pet-desk").count(), 1, "the overview is untouched by the late answer");
   assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
+
+  // Layout (owner, 2026-11-26): on a wide screen the overview is one board
+  // that fills the viewport. Neither the document nor the workspace scrolls;
+  // the blocks scroll inside. Narrow or short screens keep the page scroll.
+  const layout = page => page.evaluate(() => {
+    const doc = document.documentElement;
+    const workspace = document.querySelector(".workspace");
+    const box = selector => document.querySelector(selector)?.getBoundingClientRect();
+    const inView = rect => Boolean(rect) && rect.top >= 0 && rect.bottom <= innerHeight + 0.5 && rect.height > 0;
+    const scroller = id => { const el = document.querySelector(`#${id} .pet-desk-scroll`); return el ? {scroll: el.scrollHeight, client: el.clientHeight} : null; };
+    return {
+      docScroll: doc.scrollHeight - doc.clientHeight,
+      workspaceScroll: workspace.scrollHeight - workspace.clientHeight,
+      sideways: doc.scrollWidth - doc.clientWidth,
+      board: getComputedStyle(document.querySelector(".pet-desk-col")).display !== "contents",
+      headers: ["pet-desk-needs", "pet-desk-waiting", "pet-desk-pet", "pet-desk-running", "pet-desk-insights"].map(id => inView(box(`#${id} > header`))),
+      follows: [...document.querySelectorAll(".pet-desk-follows > details > summary")].map(el => inView(el.getBoundingClientRect())),
+      columns: ["pet-desk-col-side", "pet-desk-col-main", "pet-desk-col-run"].map(name => Math.round(document.querySelector(`.${name} > section`).getBoundingClientRect().left)),
+      stackOrder: [box("#pet-desk-waiting").bottom <= box("#pet-desk-pet").top, box("#pet-desk-running").bottom <= box("#pet-desk-insights").top],
+      needs: scroller("pet-desk-needs"), waiting: scroller("pet-desk-waiting"), running: scroller("pet-desk-running"),
+    };
+  });
+  const fitsBoard = (m, label) => {
+    assert.equal(m.board, true, `${label}: board layout`);
+    assert.ok(m.docScroll <= 0, `${label}: the document must not scroll (${m.docScroll}px)`);
+    assert.ok(m.workspaceScroll <= 0, `${label}: the workspace must not scroll (${m.workspaceScroll}px)`);
+    assert.ok(m.sideways <= 0, `${label}: no sideways scroll (${m.sideways}px)`);
+    assert.deepEqual(m.headers, [true, true, true, true, true], `${label}: every block header is on screen`);
+    assert.deepEqual(m.follows, [true, true, true], `${label}: the three follow titles are on screen`);
+    assert.ok(m.columns[0] < m.columns[1] && m.columns[1] < m.columns[2], `${label}: waiting | for you | running, left to right`);
+    assert.deepEqual(m.stackOrder, [true, true], `${label}: waiting above the pet's side, running above the last 7 days`);
+  };
+  const layoutPage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  layoutPage.on("pageerror", error => errors.push(error.message));
+  const shots = process.env.AHA_PET_DESK_SCREENSHOT_DIR;
+  if (shots) await mkdir(shots, {recursive: true});
+  const openLayout = async (width, height, query) => {
+    await layoutPage.setViewportSize({width, height});
+    await layoutPage.goto(`${url}/?desk=${query}`, {waitUntil: "domcontentloaded"});
+    await layoutPage.waitForSelector("#pet-workbench-body #pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+  };
+  for (const [width, height] of [[1920, 912], [1440, 900]]) {
+    const label = `${width}x${height}`;
+    await openLayout(width, height, "owner");
+    fitsBoard(await layout(layoutPage), `${label} owner`);
+    if (shots) await layoutPage.screenshot({path: resolve(shots, `pet-desk-${label}.png`)});
+    // The last reply is one line; expanding shows the original text and the
+    // page still does not scroll. Opening a follow list keeps it that way.
+    const reply = layoutPage.locator(".pet-desk-reply");
+    assert.ok((await reply.boundingBox()).height < 48, `${label}: the last reply is one line`);
+    assert.doesNotMatch(await reply.locator(".pet-desk-reply-text").innerText(), /\*\*|__|`/, "the preview drops Markdown markers");
+    const toggle = reply.locator("[data-pet-desk-reply-toggle]");
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    await toggle.click();
+    assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+    assert.equal(await toggle.innerText(), "Collapse");
+    assert.match(await reply.locator(".pet-desk-reply-full").innerText(), /\*\*task-813[\s\S]*__其余项目__/, "the full text is the original");
+    await layoutPage.locator("#pet-overview-ignored summary").click();
+    let m = await layout(layoutPage);
+    fitsBoard(m, `${label} expanded`);
+    assert.ok(await layoutPage.locator("#pet-overview-ignored .pet-overview-other-body").evaluate(el => el.scrollHeight > el.clientHeight && el.getBoundingClientRect().bottom <= innerHeight), `${label}: the open follow list scrolls inside`);
+    await toggle.click();
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(await reply.locator(".pet-desk-reply-full").isHidden(), true);
+    // Long text: a running row's note is two lines until it gets focus.
+    const note = layoutPage.locator("#pet-desk-running .pet-desk-detail").first();
+    const clamped = (await note.boundingBox()).height;
+    assert.ok(clamped < 2.6 * 13 * 1.6, `${label}: the note is at most two lines (${clamped}px)`);
+    assert.match(await note.locator("[title]").getAttribute("title"), /registerWorkspaceTerminalRoutes/, "the hint holds the full note");
+    await note.focus();
+    assert.ok((await note.boundingBox()).height > clamped, `${label}: focus shows the whole note`);
+
+    await openLayout(width, height, "large");
+    m = await layout(layoutPage);
+    fitsBoard(m, `${label} large`);
+    for (const name of ["needs", "waiting", "running"]) assert.ok(m[name].scroll > m[name].client, `${label}: ${name} scrolls inside its block`);
+    // The keyboard reaches a block's scroll area and scrolls it; the header stays.
+    const needs = layoutPage.locator("#pet-desk-needs .pet-desk-scroll");
+    assert.equal(await needs.getAttribute("tabindex"), "0");
+    await needs.focus();
+    await layoutPage.keyboard.press("PageDown");
+    await layoutPage.waitForFunction(() => document.querySelector("#pet-desk-needs .pet-desk-scroll").scrollTop > 0);
+    fitsBoard(await layout(layoutPage), `${label} large scrolled`);
+    await layoutPage.locator("#pet-overview-unfollowed summary").click();
+    await layoutPage.locator("[data-pet-desk-reply-toggle]").click();
+    fitsBoard(await layout(layoutPage), `${label} large expanded`);
+  }
+  // A follow action still works from the board's follow lists.
+  await layoutPage.locator('#pet-overview-unfollowed [data-pet-watch-follow][data-pet-watch-task="t-un0"]').click();
+  await layoutPage.waitForFunction(() => (window.__watchWrites || []).some(([method, id]) => method === "POST" && id === "t-un0"));
+  await openLayout(1366, 768, "owner");
+  fitsBoard(await layout(layoutPage), "1366x768");
+  await openLayout(1366, 768, "large");
+  fitsBoard(await layout(layoutPage), "1366x768 large");
+  // Narrow or phone: the pre-board flow and a page that scrolls.
+  for (const [width, height] of [[900, 700], [390, 844]]) {
+    await openLayout(width, height, "owner");
+    const m = await layout(layoutPage);
+    assert.equal(m.board, false, `${width}x${height}: no board`);
+    assert.ok(m.docScroll > 0 || m.workspaceScroll > 0, `${width}x${height}: the page scrolls`);
+    assert.ok(m.sideways <= 1, `${width}x${height}: no sideways scroll (${m.sideways}px)`);
+    const order = await layoutPage.evaluate(() => ["pet-desk-needs", "pet-desk-waiting", "pet-desk-pet", "pet-desk-insights"].map(id => document.getElementById(id).getBoundingClientRect().top));
+    assert.deepEqual([...order].sort((a, b) => a - b), order, `${width}x${height}: for you, waiting, the pet's side, last 7 days top to bottom`);
+  }
+  assert.deepEqual(await untranslated(layoutPage), [], "English board left untranslated Chinese");
+  await layoutPage.close();
 
   // Chinese records page.
   await openOverview(page, "?language=zh-CN");

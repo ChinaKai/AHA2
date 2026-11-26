@@ -1388,7 +1388,7 @@ test("desk later list folds by default with its total and keeps its order", asyn
   assert.ok(later.indexOf("idea-1") < later.indexOf("t-3"), "server order");
   assert.match(later, /宠物的想法 · 等了 10 分钟/);
   assert.match(later, /等你下一句话 · <span data-i18n-ignore>task-3<\/span>/);
-  assert.match(later, /<p class="pet-desk-detail">下一步：<span data-i18n-ignore>Wait for review notes<\/span><\/p>/);
+  assert.match(later, /<p class="pet-desk-detail" tabindex="0">下一步：<span data-i18n-ignore title="Wait for review notes">Wait for review notes<\/span><\/p>/);
   assert.doesNotMatch(later, /pet-desk-index/, "later rows are not numbered");
   assert.match(later, /还有 10 条未显示/);
 });
@@ -1405,7 +1405,7 @@ test("desk waiting and running columns label every kind and show elapsed time an
   const running = section(html, "pet-desk-running");
   assert.match(running, /<h3>在跑什么（4）<\/h3>/);
   assert.match(running, /task-811<\/span> · <span data-i18n-ignore>Overnight comparison<\/span><\/strong><small>[^<]* · 已跑 12 分钟<\/small>/);
-  assert.match(running, /<p class="pet-desk-detail"><span data-i18n-ignore>comparing builds<\/span><\/p>/);
+  assert.match(running, /<p class="pet-desk-detail" tabindex="0"><span data-i18n-ignore title="comparing builds">comparing builds<\/span><\/p>/);
   assert.match(running, /<p class="pet-desk-hardware">硬件：<span data-i18n-ignore>Debug board 1<\/span><\/p>/);
   const preparing = running.match(/data-pet-overview-task="t-812">[\s\S]*?<\/small>/)?.[0] ?? "";
   assert.match(preparing, /Preparing task/);
@@ -1426,7 +1426,7 @@ test("desk pet side lists corrections, loops and agenda with totals", async () =
 test("desk layout replaces the cards and recent activity but keeps the follow lists", async () => {
   const i18n = await deskCatalog("zh-CN");
   const html = renderPetOverview(deskOptions(i18n, deskFixture()));
-  const order = ["pet-desk-status", "pet-desk-needs", "pet-desk-pair", "pet-desk-waiting", "pet-desk-running", "pet-desk-pet", "pet-overview-follows", "pet-overview-ignored", "pet-overview-unfollowed"]
+  const order = ["pet-desk-status", "pet-desk-board", "pet-desk-col-main", "pet-desk-needs", "pet-desk-col-side", "pet-desk-waiting", "pet-desk-pet", "pet-desk-col-run", "pet-desk-running", "pet-desk-insights", "pet-overview-follows", "pet-overview-ignored", "pet-overview-unfollowed"]
     .map(marker => html.indexOf(marker));
   assert.ok(order.every(index => index >= 0), `every block renders: ${order}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, "top-to-bottom order");
@@ -1440,7 +1440,7 @@ test("every empty desk block says so, and an empty needs list says nothing waits
   const empty = {needs_owner: [], needs_owner_total: 0, later: [], later_total: 0, waiting_others: [], waiting_others_total: 0, running: [], running_total: 0, corrections: [], open_loops: [], open_loops_total: 0, agenda: [], agenda_total: 0};
   const html = renderPetOverview(deskOptions(i18n, empty));
   assert.match(section(html, "pet-desk-needs"), /<div class="field-help pet-desk-empty">现在没有事等你定。<\/div>/);
-  assert.match(html, /<summary>不急的还有 0 件<\/summary><div class="field-help pet-desk-empty">没有不急的事。<\/div>/);
+  assert.match(html, /<summary>不急的还有 0 件<\/summary><div class="pet-desk-later-body"><div class="field-help pet-desk-empty">没有不急的事。<\/div><\/div>/);
   assert.match(section(html, "pet-desk-waiting"), /没有在等别人的事。/);
   assert.match(section(html, "pet-desk-running"), /现在没有任务在跑。/);
   assert.match(section(html, "pet-desk-pet"), /宠物这边没有未闭环的事。/);
@@ -1601,7 +1601,7 @@ test("loop waits from the pet's ledgers show the item, next step and source file
     {kind: "loop", title: "等渠道恢复", on: "core/agenda.md", since: "0001-01-01T00:00:00Z"},
   ], waiting_others_total: 2};
   const waiting = section(renderPetOverview(deskOptions(i18n, desk)), "pet-desk-waiting");
-  assert.match(waiting, /<li class="pet-desk-item kind-loop"><div class="pet-desk-item-body"><button type="button" class="pet-desk-item-main" data-pet-overview-jump="records"><strong><span data-i18n-ignore>等合作方答复 &lt;格式&gt;<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/loops\.md<\/span><\/small><\/button><p class="pet-desk-detail">下一步：<span data-i18n-ignore>周五再问<\/span><\/p>/);
+  assert.match(waiting, /<li class="pet-desk-item kind-loop"><div class="pet-desk-item-body"><button type="button" class="pet-desk-item-main" data-pet-overview-jump="records"><strong><span data-i18n-ignore>等合作方答复 &lt;格式&gt;<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/loops\.md<\/span><\/small><\/button><p class="pet-desk-detail" tabindex="0">下一步：<span data-i18n-ignore title="周五再问">周五再问<\/span><\/p>/);
   assert.match(waiting, /等渠道恢复<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/agenda\.md<\/span><\/small><\/button><\/div><\/li>/, "no next step, no detail line");
   assert.doesNotMatch(waiting, /等了/, "loop waits have no time");
 });
@@ -1623,6 +1623,18 @@ test("the last reply line shows the wake reply, NOOP copy, or the latest reply",
   for (const reply of [undefined, null, [], {text: "", noop: false}]) {
     assert.doesNotMatch(render(reply), /pet-desk-reply/, `no line for ${JSON.stringify(reply)}`);
   }
+});
+
+test("a long last reply shows a marker-free one-line preview and the original text behind an expand button", async () => {
+  const {petDeskReplyPreview} = await import("../build/pet_desk.js");
+  assert.equal(petDeskReplyPreview("它的 commit `061d1cf` 就是 **task-813**\n\n另外 __watch__ 了"), "它的 commit 061d1cf 就是 task-813 另外 watch 了");
+  const i18n = await deskCatalog("zh-CN");
+  const text = `把 **0.5.577** 的来源查清了 <b>\`061d1cf\`</b>\n\n${"后面还有很多字。".repeat(40)}`;
+  const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), last_reply: {text, finished_at: "2026-11-26T01:30:00Z", noop: false, from_wake: true}}));
+  const line = html.match(/<section class="pet-desk-reply"[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.match(line, /<span class="pet-desk-reply-text" data-i18n-ignore>把 0\.5\.577 的来源查清了 &lt;b&gt;061d1cf&lt;\/b&gt; 后面/, "preview drops the markers and escapes");
+  assert.match(line, /<button type="button" class="pet-desk-reply-toggle" data-pet-desk-reply-toggle aria-expanded="false" aria-controls="pet-desk-reply-full">展开<\/button>/);
+  assert.match(line, /<div class="pet-desk-reply-full" id="pet-desk-reply-full" tabindex="0" data-i18n-ignore hidden>把 \*\*0\.5\.577\*\* 的来源查清了 &lt;b&gt;`061d1cf`&lt;\/b&gt;\n\n后面/, "full text is the original, escaped");
 });
 
 test("the last 7 days block renders counts, outcomes and the token scope", async () => {

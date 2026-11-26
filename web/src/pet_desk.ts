@@ -366,6 +366,21 @@ function deskTruncated(total: number, shown: number, translate: Translate): stri
   return `<div class="field-help pet-desk-more">${escapeHTML(translate("petWorkbench.desk.notShown", {count: String(total - shown)}))}</div>`;
 }
 
+// deskScroll wraps a block's rows. On a wide screen the desk fits the
+// viewport and each block scrolls inside this wrapper under its fixed header;
+// tabindex lets the keyboard reach a wrapper whose rows have no buttons.
+function deskScroll(inner: string): string {
+  return `<div class="pet-desk-scroll" tabindex="0">${inner}</div>`;
+}
+
+// deskDetail is a row's explanatory line. CSS clamps it to two lines; the
+// full text stays in the hover hint, and focusing the line (click or Tab)
+// lifts the clamp so keyboard and touch users can read all of it.
+function deskDetail(text: string, label = ""): string {
+  // The hint sits on the ignored span: it is server text, not UI copy.
+  return `<p class="pet-desk-detail" tabindex="0">${label}<span data-i18n-ignore title="${escapeHTML(text)}">${escapeHTML(text)}</span></p>`;
+}
+
 // The kinds below are the desk API contract (internal/app/pet_desk.go). A kind
 // this page does not know yet gets the generic label of its list instead of an
 // empty cell or a raw catalog key.
@@ -445,8 +460,7 @@ function renderDeskNeed(item: PetDeskNeed, position: number | null, options: Pet
   if (kind === "question" && questions.length) {
     body = `<ul class="pet-desk-questions">${questions.map(question => deskText(question, "li")).join("")}</ul>`;
   } else if (detail) {
-    const label = kind === "next_step" ? `${escapeHTML(translate("petWorkbench.desk.nextStep"))}` : "";
-    body = `<p class="pet-desk-detail">${label}${deskText(detail)}</p>`;
+    body = deskDetail(detail, kind === "next_step" ? escapeHTML(translate("petWorkbench.desk.nextStep")) : "");
   }
   const actions: string[] = [];
   if (isApproval) actions.push(`<button type="button" data-pet-approval-open="${escapeHTML(approvalID)}">${escapeHTML(translate("petWorkbench.desk.review"))}</button>`);
@@ -501,7 +515,7 @@ function renderDeskWait(item: PetDeskWait, options: PetOverviewOptions, now: num
     : `<div class="pet-desk-item-main">${head}</div>`;
   const detail = textValue(item.detail);
   const next = kind === "loop" && detail
-    ? `<p class="pet-desk-detail">${escapeHTML(translate("petWorkbench.desk.nextStep"))}${deskText(detail)}</p>`
+    ? deskDetail(detail, escapeHTML(translate("petWorkbench.desk.nextStep")))
     : "";
   return `<li class="pet-desk-item kind-${deskKindClass(kind)}"><div class="pet-desk-item-body">${main}${next}</div></li>`;
 }
@@ -521,7 +535,7 @@ function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: numbe
   const detail = textValue(item.detail);
   const hardware = deskStrings(item.hardware);
   const lines = [
-    detail ? `<p class="pet-desk-detail">${deskText(detail)}</p>` : "",
+    detail ? deskDetail(detail) : "",
     hardware.length ? `<p class="pet-desk-hardware">${escapeHTML(translate("petWorkbench.desk.hardware"))}${hardware.map(name => deskText(name)).join(", ")}</p>` : "",
   ].join("");
   return `<li class="pet-desk-item kind-running"><div class="pet-desk-item-body">${main}${lines}</div></li>`;
@@ -529,7 +543,7 @@ function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: numbe
 
 function renderDeskSection(id: string, className: string, title: string, rows: string[], total: number, empty: string, translate: Translate, extra = ""): string {
   const list = rows.length
-    ? `<ol class="pet-desk-list">${rows.join("")}</ol>${deskTruncated(total, rows.length, translate)}`
+    ? deskScroll(`<ol class="pet-desk-list">${rows.join("")}</ol>${deskTruncated(total, rows.length, translate)}`)
     : `<div class="field-help pet-desk-empty">${escapeHTML(empty)}</div>`;
   return `<section class="pet-desk-section ${className}" id="${id}" aria-label="${escapeHTML(title)}">
     <header><h3>${escapeHTML(title)}</h3></header>
@@ -603,14 +617,37 @@ function renderDeskPetSide(desk: PetDesk, translate: Translate): string {
   }
   return `<section class="pet-desk-section pet-desk-pet" id="pet-desk-pet" aria-label="${escapeHTML(title)}">
     ${header}
-    <div class="pet-desk-ledger-group"><h4>${escapeHTML(correctionTitle)}</h4>${correctionBody}</div>
+    ${deskScroll(`<div class="pet-desk-ledger-group"><h4>${escapeHTML(correctionTitle)}</h4>${correctionBody}</div>
     ${ledger("petWorkbench.desk.openLoops", loops, loopsTotal)}
-    ${ledger("petWorkbench.desk.agenda", agenda, agendaTotal)}
+    ${ledger("petWorkbench.desk.agenda", agenda, agendaTotal)}`)}
   </section>`;
 }
 
+// petDeskReplyPreview is the one-line preview of the last reply: the reply
+// is Markdown-ish chat text, so bold, underline and code markers are dropped
+// and line breaks fold into spaces. The expanded text keeps the original.
+export function petDeskReplyPreview(text: string): string {
+  return text.replace(/\*\*|__|`/g, "").replace(/\s+/g, " ").trim();
+}
+
+// The expand control's copy lives in this chunk, like the records copy, so
+// the shared first-screen catalog does not grow for a desk-only button.
+const PET_DESK_COPY: Record<"zh-CN" | "en-US", Record<"expand" | "collapse", string>> = {
+  "zh-CN": {expand: "展开", collapse: "收起"},
+  "en-US": {expand: "Expand", collapse: "Collapse"},
+};
+
+function deskCopy(key: "expand" | "collapse"): string {
+  return PET_DESK_COPY[currentLocale() === "en-US" ? "en-US" : "zh-CN"][key];
+}
+
+// A reply this short, without markers or line breaks, already fits the
+// preview line on the narrowest board, so it gets no expand button.
+const PET_DESK_REPLY_SHORT = 40;
+
 // renderDeskLastReply is one line under the status row: what the pet said
-// in its latest finished round. No reply, no line.
+// in its latest finished round. No reply, no line. A longer reply shows a
+// one-line preview and an expand button; bindPetDesk wires the button.
 function renderDeskLastReply(reply: PetDeskLastReply | undefined, options: PetOverviewOptions, now: number): string {
   if (!reply || typeof reply !== "object" || Array.isArray(reply)) return "";
   const text = textValue(reply.text);
@@ -622,10 +659,33 @@ function renderDeskLastReply(reply: PetDeskLastReply | undefined, options: PetOv
   const time = finished && petDeskElapsedMinutes(finished, now) !== null
     ? `<small>${escapeHTML(options.formatTime(finished))}</small>`
     : "";
-  const body = reply.noop
-    ? `<span class="pet-desk-reply-noop">${escapeHTML(translate("petWorkbench.desk.lastNoop"))}</span>`
-    : deskText(text, "span", "pet-desk-reply-text");
-  return `<section class="pet-desk-reply" aria-label="${escapeHTML(label)}"><strong>${escapeHTML(label)}</strong>${body}${time}</section>`;
+  if (reply.noop) {
+    return `<section class="pet-desk-reply" aria-label="${escapeHTML(label)}"><strong>${escapeHTML(label)}</strong><span class="pet-desk-reply-noop">${escapeHTML(translate("petWorkbench.desk.lastNoop"))}</span>${time}</section>`;
+  }
+  const preview = petDeskReplyPreview(text);
+  if (preview === text && text.length <= PET_DESK_REPLY_SHORT) {
+    return `<section class="pet-desk-reply" aria-label="${escapeHTML(label)}"><strong>${escapeHTML(label)}</strong>${deskText(text, "span", "pet-desk-reply-text")}${time}</section>`;
+  }
+  const toggle = `<button type="button" class="pet-desk-reply-toggle" data-pet-desk-reply-toggle aria-expanded="false" aria-controls="pet-desk-reply-full">${escapeHTML(deskCopy("expand"))}</button>`;
+  return `<section class="pet-desk-reply" aria-label="${escapeHTML(label)}"><strong>${escapeHTML(label)}</strong>${deskText(preview, "span", "pet-desk-reply-text")}${toggle}${time}<div class="pet-desk-reply-full" id="pet-desk-reply-full" tabindex="0" data-i18n-ignore hidden>${escapeHTML(text)}</div></section>`;
+}
+
+// bindPetDesk wires the desk's own controls after every paint: the last
+// reply's expand button swaps the preview line for the full text.
+export function bindPetDesk(root: ParentNode): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-pet-desk-reply-toggle]").forEach(button => {
+    const section = button.closest(".pet-desk-reply");
+    const preview = section?.querySelector<HTMLElement>(".pet-desk-reply-text");
+    const full = section?.querySelector<HTMLElement>(".pet-desk-reply-full");
+    if (!preview || !full) return;
+    button.addEventListener("click", () => {
+      const open = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", String(open));
+      button.textContent = deskCopy(open ? "collapse" : "expand");
+      preview.hidden = open;
+      full.hidden = !open;
+    });
+  });
 }
 
 /* Last 7 days ------------------------------------------------------------- */
@@ -697,7 +757,7 @@ export function renderPetInsightsBody(insights: PetInsights | null | undefined, 
     [translate("petWorkbench.insights.corrections", {count: insightCount(insights.corrections)}), ""],
     [translate("petWorkbench.insights.wakes", {count: insightCount(wakes.turns), noop: insightCount(wakes.noop)}), tokens],
   ];
-  return `${header}${range}<ul class="pet-desk-insights-list">${rows.map(([line, detail]) => `<li><strong>${escapeHTML(line)}</strong>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</li>`).join("")}</ul>`;
+  return `${header}${deskScroll(`${range}<ul class="pet-desk-insights-list">${rows.map(([line, detail]) => `<li><strong>${escapeHTML(line)}</strong>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</li>`).join("")}</ul>`)}`;
 }
 
 function formatTokens(value: number): string {
@@ -725,7 +785,7 @@ function renderPetDesk(desk: PetDesk, options: PetOverviewOptions): string {
   const laterBody = later.length
     ? `<ol class="pet-desk-list">${later.map(item => renderDeskNeed(item, null, options, now)).join("")}</ol>${deskTruncated(totals.later, later.length, translate)}`
     : `<div class="field-help pet-desk-empty">${escapeHTML(translate("petWorkbench.desk.emptyLater"))}</div>`;
-  const laterDetails = `<details class="pet-desk-later" id="pet-desk-later"><summary>${escapeHTML(laterTitle)}</summary>${laterBody}</details>`;
+  const laterDetails = `<details class="pet-desk-later" id="pet-desk-later"><summary>${escapeHTML(laterTitle)}</summary><div class="pet-desk-later-body">${laterBody}</div></details>`;
   const needsSection = renderDeskSection(
     "pet-desk-needs", "pet-desk-needs",
     translate("petWorkbench.desk.needsTitle", {count: String(totals.needs)}),
@@ -745,13 +805,18 @@ function renderPetDesk(desk: PetDesk, options: PetOverviewOptions): string {
     totals.running, translate("petWorkbench.desk.emptyRunning"), translate,
   );
   const {lists} = renderOverviewWatchLists(options.watches || [], options);
+  // The board is three columns on a wide screen: for-you in the middle (first
+  // in the markup, so it is also first for the keyboard and on a phone),
+  // waiting and the pet's side on the left, running and the last 7 days on
+  // the right. Narrower screens dissolve the columns back into one flow.
   return `<div class="pet-overview pet-desk">
     ${renderDeskStatus(desk, options, totals)}
     ${renderDeskLastReply(desk.last_reply, options, now)}
-    ${needsSection}
-    <div class="pet-desk-pair">${waitingSection}${runningSection}</div>
-    ${renderDeskPetSide(desk, translate)}
-    ${renderPetInsightsPlaceholder(translate)}
+    <div class="pet-desk-board">
+      <div class="pet-desk-col pet-desk-col-main">${needsSection}</div>
+      <div class="pet-desk-col pet-desk-col-side">${waitingSection}${renderDeskPetSide(desk, translate)}</div>
+      <div class="pet-desk-col pet-desk-col-run">${runningSection}${renderPetInsightsPlaceholder(translate)}</div>
+    </div>
     <div class="pet-desk-follows">${lists}</div>
   </div>`;
 }

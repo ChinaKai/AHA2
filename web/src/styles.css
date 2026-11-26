@@ -3088,13 +3088,20 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 .pet-desk-item-main small { color: var(--color-text-muted); font-size: var(--font-size-12); }
 .pet-desk-item.kind-blocked .pet-desk-item-main small, .pet-desk-item.kind-failed .pet-desk-item-main small, .pet-desk-item.kind-stopped .pet-desk-item-main small { color: var(--color-danger-ink); }
 .pet-desk-detail, .pet-desk-hardware { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-13); overflow-wrap: anywhere; }
+/* Details clamp to two lines; focusing one (click or Tab) shows all of it. */
+.pet-desk-detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.pet-desk-detail:focus { display: block; }
 .pet-desk-questions { margin: 0; padding-left: var(--space-4); display: grid; gap: 2px; font-size: var(--font-size-13); overflow-wrap: anywhere; }
 .pet-desk-item-actions { flex: 0 0 auto; display: flex; gap: var(--space-1); }
 .pet-desk-item-actions button { border: 1px solid var(--color-border); background: transparent; color: var(--color-text-muted); border-radius: var(--radius-control); padding: 2px var(--space-2); font: inherit; font-size: var(--font-size-12); cursor: pointer; white-space: nowrap; min-height: 28px; }
 .pet-desk-later { border-top: 1px dashed var(--color-border); padding-top: var(--space-2); }
 .pet-desk-later summary { cursor: pointer; color: var(--color-text-muted); font-size: var(--font-size-13); }
 .pet-desk-later > .pet-desk-list, .pet-desk-later > .field-help { margin-top: var(--space-2); }
-.pet-desk-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); align-items: start; }
+/* Below the wide board the columns dissolve into the pre-board flow. */
+.pet-desk-board { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "needs needs" "wait run" "pet pet" "week week"; gap: var(--space-3); align-items: start; }
+.pet-desk-col { display: contents; }
+.pet-desk-needs { grid-area: needs; } .pet-desk-waiting { grid-area: wait; } .pet-desk-running { grid-area: run; } .pet-desk-pet { grid-area: pet; } .pet-desk-insights { grid-area: week; }
+.pet-desk-scroll { display: grid; gap: var(--space-2); align-content: start; min-width: 0; }
 .pet-desk-ledger-group { display: grid; gap: var(--space-1); }
 .pet-desk-ledger-group h4 { margin: 0; font-size: var(--font-size-13); }
 .pet-desk-ledger { margin: 0; padding-left: var(--space-4); display: grid; gap: 2px; font-size: var(--font-size-13); overflow-wrap: anywhere; }
@@ -3123,7 +3130,10 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 .pet-record-ledger-counts { color: var(--color-text-muted); font-size: var(--font-size-12); font-weight: 400; margin-left: var(--space-2); }
 .pet-desk-reply { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); padding: var(--space-2) var(--space-3); font-size: var(--font-size-13); min-width: 0; }
 .pet-desk-reply > strong { flex: 0 0 auto; }
-.pet-desk-reply-text { flex: 1 1 240px; min-width: 0; color: var(--color-text); overflow-wrap: anywhere; white-space: pre-line; }
+.pet-desk-reply-text { flex: 1 1 240px; min-width: 0; color: var(--color-text); overflow-wrap: anywhere; }
+.pet-desk-reply:has(.pet-desk-reply-toggle) .pet-desk-reply-text { flex-basis: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pet-desk-reply-toggle { flex: 0 0 auto; min-height: 0; border: 0; background: transparent; color: var(--color-accent-ink); padding: 0; font: inherit; cursor: pointer; }
+.pet-desk-reply-full { flex: 1 0 100%; max-height: 30vh; overflow-y: auto; white-space: pre-line; overflow-wrap: anywhere; }
 .pet-desk-reply-noop { flex: 1 1 auto; color: var(--color-text-muted); }
 .pet-desk-reply small { color: var(--color-text-muted); font-size: var(--font-size-12); }
 .pet-desk-insights-range { color: var(--color-text-muted); font-size: var(--font-size-12); }
@@ -3131,8 +3141,39 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 .pet-desk-insights-list li { display: grid; gap: 2px; min-width: 0; }
 .pet-desk-insights-list strong { font-size: var(--font-size-13); }
 .pet-desk-insights-list small { color: var(--color-text-muted); font-size: var(--font-size-12); overflow-wrap: anywhere; }
+/* Wide and tall enough: the desk is one board that fills the viewport. The
+   page itself does not scroll; each block scrolls under its own header. */
+@media (min-width: 1100px) and (min-height: 640px) {
+  .pet-workbench-page { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2) var(--space-4); }
+  .pet-workbench-page > .page-head { margin: 0; }
+  .pet-workbench-page > .page-head p { display: none; }
+  .pet-workbench-page > .pet-workbench-tabs { margin: 0; }
+  .pet-workbench-page > .pet-workbench-body { grid-column: 1 / -1; }
+  .workspace:has(.pet-desk-board) { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+  .workspace:has(.pet-desk-board) > *, .pet-desk > *, .pet-desk-section > header, .pet-desk-later { flex: 0 0 auto; }
+  .workspace > .pet-workbench-page:has(.pet-desk-board) { flex: 1 1 auto; min-height: 0; width: min(1600px, 100%); padding: var(--space-4) var(--space-5); grid-template-rows: auto minmax(0, 1fr); align-items: stretch; }
+  .pet-workbench-body:has(> .pet-desk) { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .pet-desk { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .pet-desk-status, .pet-desk-status-counts { flex-wrap: nowrap; white-space: nowrap; overflow: hidden; }
+  .pet-desk > .pet-desk-board { flex: 1 1 auto; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "side main run"; align-items: stretch; }
+  /* overflow is the last resort for a very short viewport with a block open. */
+  .pet-desk-col { display: flex; flex-direction: column; gap: var(--space-3); min-height: 0; overflow-y: auto; }
+  .pet-desk-col-side { grid-area: side; } .pet-desk-col-main { grid-area: main; } .pet-desk-col-run { grid-area: run; }
+  .pet-desk-col > .pet-desk-section { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 96px; overflow: hidden; }
+  /* A block without rows keeps its natural height and leaves the rest. */
+  .pet-desk-col > .pet-desk-section:not(:has(> .pet-desk-scroll)) { flex-shrink: 0; min-height: 0; }
+  .pet-desk-col-main > .pet-desk-needs { flex-grow: 1; }
+  /* The week is a handful of lines: a long running list gives way first. */
+  .pet-desk-col > .pet-desk-insights { flex-shrink: .05; }
+  .pet-desk-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .pet-desk-later { margin-top: auto; }
+  .pet-desk-later-body, .pet-desk-follows .pet-overview-follows-body, .pet-desk-follows .pet-overview-other-body { max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
+  .pet-desk-follows { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+  .pet-desk-insights-list { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
+}
+.pet-desk-scroll:focus-visible, .pet-desk-detail:focus-visible, .pet-desk-reply-full:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 @media (max-width: 760px) {
-  .pet-desk-pair { grid-template-columns: minmax(0, 1fr); }
+  .pet-desk-board { grid-template-columns: minmax(0, 1fr); grid-template-areas: "needs" "wait" "run" "pet" "week"; }
   .pet-desk-item { flex-wrap: wrap; }
   .pet-desk-item-actions { width: 100%; padding-left: calc(var(--font-size-16) + var(--space-2)); }
   .pet-desk-checked { margin-left: 0; }
