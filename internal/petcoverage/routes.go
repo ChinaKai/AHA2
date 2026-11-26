@@ -45,8 +45,10 @@ var registeringFunctions = map[string]string{
 	"internal/httpapi (*Server).routeMux":              "httpapi",
 	"internal/httpapi (*Server).registerBrowserRoutes": "httpapi",
 	"internal/httpapi (*Server).registerDesktopRoutes": "httpapi",
-	"internal/httpapi (*Server).MailDownloadHandler":   "mail-download",
-	"internal/centersync (*Store).Handler":             "centersync",
+	// Called only from routeMux (workspace viewer terminals, c08feca).
+	"internal/httpapi (*Server).registerWorkspaceTerminalRoutes": "httpapi",
+	"internal/httpapi (*Server).MailDownloadHandler":             "mail-download",
+	"internal/centersync (*Store).Handler":                       "centersync",
 }
 
 // nonRouteHandleCalls lists two-argument Handle/HandleFunc calls that are
@@ -64,6 +66,17 @@ var boundaries = map[string]string{
 	"withAuth":              "owner_session",
 	"withChannelCapability": "channel_runtime",
 	"auth":                  "device_token",
+	// Owner session plus CSRF, a configured-origin check and a refusal of
+	// Authorization headers, for the workspace viewer terminals (c08feca).
+	"withWorkspaceTerminalOwner": "owner_session",
+}
+
+// wrapperHandlerArgument records, for a reviewed wrapper whose wrapped
+// handler is not its last argument, which argument it is. Every other
+// wrapper takes the handler last. The remaining arguments must still be
+// constants and still go into the fingerprint.
+var wrapperHandlerArgument = map[string]int{
+	"withWorkspaceTerminalOwner": 0, // (handler http.HandlerFunc, requireOrigin bool)
 }
 
 // fingerprintVersion prefixes every fingerprint of the current scheme.
@@ -80,6 +93,11 @@ type goPackage struct {
 	sources   map[string][]byte
 	constants map[string]ast.Expr
 	methods   map[string]*ast.FuncDecl // handler name -> method declaration
+	// functions holds package-level functions (no receiver) by name, for a
+	// handler written as a bare identifier such as
+	// mux.HandleFunc(path, methodNotAllowed). Go forbids two package-level
+	// functions with one name, so a name maps to at most one declaration.
+	functions map[string]*ast.FuncDecl
 }
 
 func loadPackages(root string) (map[string]*goPackage, error) {
@@ -105,7 +123,7 @@ func loadPackages(root string) (map[string]*goPackage, error) {
 			dir = filepath.ToSlash(dir)
 			pkg := packages[dir]
 			if pkg == nil {
-				pkg = &goPackage{dir: dir, fset: token.NewFileSet(), files: map[string]*ast.File{}, sources: map[string][]byte{}, constants: map[string]ast.Expr{}, methods: map[string]*ast.FuncDecl{}}
+				pkg = &goPackage{dir: dir, fset: token.NewFileSet(), files: map[string]*ast.File{}, sources: map[string][]byte{}, constants: map[string]ast.Expr{}, methods: map[string]*ast.FuncDecl{}, functions: map[string]*ast.FuncDecl{}}
 				packages[dir] = pkg
 			}
 			content, err := os.ReadFile(path)
@@ -141,6 +159,9 @@ func loadPackages(root string) (map[string]*goPackage, error) {
 						}
 					}
 				case *ast.FuncDecl:
+					if value.Recv == nil && value.Body != nil && value.Name.Name != "init" && value.Name.Name != "_" {
+						pkg.functions[value.Name.Name] = value
+					}
 					if value.Recv != nil && value.Body != nil {
 						if _, exists := pkg.methods[value.Name.Name]; exists {
 							// Same-named methods on different receivers would make the
@@ -341,6 +362,11 @@ type scope struct {
 	muxes    map[string]bool
 	// enclosing holds the ancestors of the call being resolved, innermost last.
 	enclosing []ast.Node
+	// bound holds the loop variable of a string-slice range while one of its
+	// elements is being expanded.
+	bound map[string]string
+	// evaluating guards eval against a local defined in terms of itself.
+	evaluating map[string]bool
 }
 
 func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl, stats *ScanStats) ([]Registration, int, error) {
@@ -455,6 +481,31 @@ func (current *scope) registrations(source, server string, call *ast.CallExpr) (
 		item, err := current.registration(source, server, pattern, call.Args[1], nil)
 		return []Registration{item}, err
 	}
+	// mux.Handle("GET "+base, ...) inside `for _, base := range []string{...}`:
+	// expand once per element of that literal string slice. A bare
+	// route.field pattern is the struct-table shape handled below.
+	_, tableField := call.Args[0].(*ast.SelectorExpr)
+	if loop, name := current.stringRangeFor(call.Args[0]); loop != nil && !tableField {
+		values, err := current.stringRangeValues(source, loop)
+		if err != nil {
+			return nil, err
+		}
+		var result []Registration
+		for _, value := range values {
+			current.bound = map[string]string{name: value}
+			pattern, ok := current.eval(call.Args[0])
+			current.bound = nil
+			if !ok {
+				return nil, fmt.Errorf("%s: unresolvable route pattern in %s", source, functionKey(current.function))
+			}
+			item, err := current.registration(source, server, pattern, call.Args[1], nil)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, item)
+		}
+		return result, nil
+	}
 	// mux.Handle(route.pattern, wrap(route.handler)) inside a range over a
 	// literal table: expand every row of that table.
 	field, ok := call.Args[0].(*ast.SelectorExpr)
@@ -556,18 +607,28 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 				return item, fmt.Errorf("%s: unsupported handler expression for %s", source, item.Operation)
 			}
 			name := selector.Sel.Name
-			// The handler argument of a wrapper is its last argument; every
-			// other argument must be a resolvable constant. A call whose
-			// arguments include a handler is a wrapper and must be reviewed.
-			last := value.Args[len(value.Args)-1]
+			// The handler argument of a wrapper is its last argument, or the
+			// position reviewed in wrapperHandlerArgument; every other
+			// argument must be a resolvable constant. A call whose arguments
+			// include a handler is a wrapper and must be reviewed.
 			_, registered := boundaries[name]
-			if registered || isHandlerLike(last, substitute) {
+			handlerIndex := len(value.Args) - 1
+			if position, declared := wrapperHandlerArgument[name]; declared && registered {
+				if position >= len(value.Args) {
+					return item, fmt.Errorf("%s: wrapper %s on %s has no argument %d", source, name, item.Operation, position)
+				}
+				handlerIndex = position
+			}
+			if registered || containsHandlerLike(value.Args, substitute) {
 				if !registered {
 					return item, fmt.Errorf("%s: wrapper %s on %s has no reviewed boundary", source, name, item.Operation)
 				}
 				var parameters []string
-				for _, argument := range value.Args[:len(value.Args)-1] {
-					literal, ok := current.eval(argument)
+				for index, argument := range value.Args {
+					if index == handlerIndex {
+						continue
+					}
+					literal, ok := current.evalArgument(argument)
 					if !ok {
 						return item, fmt.Errorf("%s: wrapper %s on %s has a non-constant argument", source, name, item.Operation)
 					}
@@ -575,7 +636,7 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 				}
 				wrappers = append(wrappers, name)
 				wrapperCalls = append(wrapperCalls, name+"("+strings.Join(parameters, ",")+")")
-				expr = last
+				expr = value.Args[handlerIndex]
 				continue
 			}
 			for _, argument := range value.Args {
@@ -590,6 +651,20 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 		case *ast.SelectorExpr:
 			item.Handler = value.Sel.Name
 			body = current.pkg.methods[value.Sel.Name]
+		case *ast.Ident:
+			// A bare identifier is a package-level handler function in the
+			// registering package. It must not be a local or parameter of the
+			// registering function: that would be a handler value assigned
+			// somewhere else, which the scan cannot see.
+			if current.declaresLocal(value.Name) {
+				return item, fmt.Errorf("%s: handler for %s is the local value %s; pass the function or method directly", source, item.Operation, value.Name)
+			}
+			declaration := current.pkg.functions[value.Name]
+			if declaration == nil {
+				return item, fmt.Errorf("%s: handler %s for %s is not a package-level function in %s", source, value.Name, item.Operation, current.pkg.dir)
+			}
+			item.Handler = value.Name
+			body = declaration
 		case *ast.FuncLit:
 			item.Handler = "inline"
 			body = value
@@ -643,6 +718,129 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 	return item, nil
 }
 
+// stringRangeFor finds the innermost enclosing `for _, v := range` whose
+// value variable v appears in the pattern expression. Only that shape is
+// expanded; anything else stays unresolvable.
+func (current *scope) stringRangeFor(pattern ast.Expr) (*ast.RangeStmt, string) {
+	used := map[string]bool{}
+	ast.Inspect(pattern, func(node ast.Node) bool {
+		if ident, ok := node.(*ast.Ident); ok {
+			used[ident.Name] = true
+		}
+		return true
+	})
+	for index := len(current.enclosing) - 1; index >= 0; index-- {
+		loop, ok := current.enclosing[index].(*ast.RangeStmt)
+		if !ok {
+			continue
+		}
+		value, ok := loop.Value.(*ast.Ident)
+		if !ok || !used[value.Name] || loop.Tok != token.DEFINE {
+			continue
+		}
+		return loop, value.Name
+	}
+	return nil, ""
+}
+
+// stringRangeValues returns the elements of a range over a literal
+// []string{...} whose elements all evaluate to constants. The loop variable
+// must not be reassigned inside the loop.
+func (current *scope) stringRangeValues(source string, loop *ast.RangeStmt) ([]string, error) {
+	table, ok := loop.X.(*ast.CompositeLit)
+	if !ok {
+		return nil, fmt.Errorf("%s: route loop in %s does not range over a literal", source, functionKey(current.function))
+	}
+	slice, ok := table.Type.(*ast.ArrayType)
+	if !ok || slice.Len != nil {
+		return nil, fmt.Errorf("%s: route loop in %s does not range over a slice literal", source, functionKey(current.function))
+	}
+	if element, ok := slice.Elt.(*ast.Ident); !ok || element.Name != "string" {
+		return nil, fmt.Errorf("%s: route loop in %s ranges over a non-string slice", source, functionKey(current.function))
+	}
+	name := loop.Value.(*ast.Ident).Name
+	reassigned := false
+	ast.Inspect(loop.Body, func(node ast.Node) bool {
+		if assign, ok := node.(*ast.AssignStmt); ok {
+			for _, left := range assign.Lhs {
+				if ident, ok := left.(*ast.Ident); ok && ident.Name == name {
+					reassigned = true
+				}
+			}
+		}
+		return !reassigned
+	})
+	if reassigned {
+		return nil, fmt.Errorf("%s: route loop variable %s is reassigned in %s", source, name, functionKey(current.function))
+	}
+	values := make([]string, 0, len(table.Elts))
+	for _, element := range table.Elts {
+		value, ok := current.eval(element)
+		if !ok {
+			return nil, fmt.Errorf("%s: route loop in %s has a non-constant element", source, functionKey(current.function))
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+// declaresLocal reports whether name is a parameter, receiver, named result
+// or a variable declared anywhere in the registering function, which would
+// shadow a package-level function of that name.
+func (current *scope) declaresLocal(name string) bool {
+	function := current.function
+	for _, list := range []*ast.FieldList{function.Recv, function.Type.Params, function.Type.Results} {
+		if list == nil {
+			continue
+		}
+		for _, field := range list.List {
+			for _, ident := range field.Names {
+				if ident.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	found := false
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		if found {
+			return false
+		}
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			if value.Tok == token.DEFINE {
+				for _, left := range value.Lhs {
+					if ident, ok := left.(*ast.Ident); ok && ident.Name == name {
+						found = true
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for _, ident := range value.Names {
+				if ident.Name == name {
+					found = true
+				}
+			}
+		case *ast.RangeStmt:
+			for _, expr := range []ast.Expr{value.Key, value.Value} {
+				if ident, ok := expr.(*ast.Ident); ok && ident.Name == name {
+					found = true
+				}
+			}
+		case *ast.FuncLit:
+			for _, field := range value.Type.Params.List {
+				for _, ident := range field.Names {
+					if ident.Name == name {
+						found = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
 func (current *scope) eval(expr ast.Expr) (string, bool) {
 	switch value := expr.(type) {
 	case *ast.BasicLit:
@@ -651,7 +849,20 @@ func (current *scope) eval(expr ast.Expr) (string, bool) {
 			return decoded, err == nil
 		}
 	case *ast.Ident:
+		if bound, ok := current.bound[value.Name]; ok {
+			return bound, true
+		}
 		if local, ok := current.locals[value.Name]; ok {
+			// A local assigned from itself (x = x + "/y") has no single
+			// value; refuse it instead of recursing forever.
+			if current.evaluating[value.Name] {
+				return "", false
+			}
+			if current.evaluating == nil {
+				current.evaluating = map[string]bool{}
+			}
+			current.evaluating[value.Name] = true
+			defer delete(current.evaluating, value.Name)
 			return current.eval(local)
 		}
 		if constant, ok := current.pkg.constants[value.Name]; ok {
@@ -667,6 +878,34 @@ func (current *scope) eval(expr ast.Expr) (string, bool) {
 		return current.eval(value.X)
 	}
 	return "", false
+}
+
+// containsHandlerLike reports a call whose arguments include a handler: such
+// a call is a wrapper whatever position the handler is in.
+func containsHandlerLike(arguments []ast.Expr, substitute func(ast.Expr) ast.Expr) bool {
+	for _, argument := range arguments {
+		if isHandlerLike(argument, substitute) {
+			return true
+		}
+	}
+	return false
+}
+
+// evalArgument evaluates a wrapper's non-handler argument: a string constant
+// as in eval, or the predeclared true/false when no local or package
+// constant shadows them.
+func (current *scope) evalArgument(expr ast.Expr) (string, bool) {
+	if value, ok := current.eval(expr); ok {
+		return value, true
+	}
+	ident, ok := expr.(*ast.Ident)
+	if !ok || (ident.Name != "true" && ident.Name != "false") {
+		return "", false
+	}
+	if _, shadowed := current.pkg.constants[ident.Name]; shadowed || current.declaresLocal(ident.Name) {
+		return "", false
+	}
+	return ident.Name, true
 }
 
 // isHandlerLike reports an expression that can only be an http.Handler or
